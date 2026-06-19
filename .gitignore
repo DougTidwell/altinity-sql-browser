@@ -5,7 +5,8 @@
 /coverage/
 
 # Dependencies (reuse a sibling install or `npm ci`)
-/node_modules/
+# No trailing slash so a `node_modules` symlink is ignored too.
+/node_modules
 
 # Rendered, secret-bearing config — only the *.tmpl is committed
 /deploy/config.json
@@ -17,3 +18,5 @@
 # OS / editor
 .DS_Store
 *.log
+.idea/
+.vscode/
