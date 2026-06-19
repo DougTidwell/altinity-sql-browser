@@ -39,9 +39,10 @@ query handler at `/` still works.
 The SPA sends `Authorization: Bearer <id_token>` on every query. ClickHouse must
 validate it. Two supported shapes:
 
-- **Native token processor** (ClickHouse with JWT auth): add a
+- **Native token processor** (Antalya build with JWT auth): add a
   `<token_processors>` entry pointing at your IdP's JWKS with `username_claim`,
-  and a `<token>` user-directory so users are created on first query.
+  and a `<token>` user-directory so users are created on first query. Full
+  step-by-step with generic examples: [CLICKHOUSE-OAUTH.md](CLICKHOUSE-OAUTH.md).
 - **Delegated verifier**: run a JWT-verifier service (e.g. Altinity's
   [ch-jwt-verify](https://github.com/Altinity/ch-jwt-verify)) referenced from
   `<http_authentication_servers>` and define users `IDENTIFIED WITH http SERVER
