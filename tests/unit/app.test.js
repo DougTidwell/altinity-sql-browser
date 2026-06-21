@@ -484,7 +484,7 @@ describe('exhaustive controller coverage', () => {
     const app = createApp(e);
     app.renderApp();
     app.root.querySelector('.new-tab').dispatchEvent(new Event('click'));
-    app.root.querySelectorAll('.hd-btn')[0].dispatchEvent(new Event('click')); // shortcuts
+    app.root.querySelector('.hd-btn[title^="Keyboard"]').dispatchEvent(new Event('click')); // shortcuts
     app.activeTab().sql = 'SELECT 1'; // set sql on the now-active tab
     app.dom.saveBtn.dispatchEvent(new Event('click')); // open save popover
     document.querySelector('.save-popover .sp-input').value = 'Q';
