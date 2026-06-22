@@ -517,8 +517,11 @@ body {
 .raw-text-view:focus, .json-view:focus { outline: none; }
 
 /* ------------ chart view ------------ */
+/* `.res-body` is display:block, so height:100% (not flex:1) is what lets the
+   chart fill it — otherwise the view collapses to the config bar and the
+   canvas renders ~0px tall. */
 .chart-view {
-  flex: 1; min-height: 0; background: var(--bg-table);
+  height: 100%; background: var(--bg-table);
   display: flex; flex-direction: column;
 }
 .chart-config {
@@ -553,7 +556,7 @@ body {
 /* The canvas fills the remaining space; Chart.js is responsive within it. */
 .chart-canvas-wrap { flex: 1; min-height: 0; position: relative; padding: 12px 14px; }
 .chart-empty {
-  flex: 1; min-height: 0; background: var(--bg-table);
+  height: 100%; background: var(--bg-table);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 8px; padding: 24px; text-align: center;
   color: var(--fg-faint); font-size: 12px;
