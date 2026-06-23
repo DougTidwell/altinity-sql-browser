@@ -328,7 +328,7 @@ export function createApp(env = {}) {
   }
   app.tickElapsed = tickElapsed;
 
-  async function run() {
+  async function run(opts) {
     if (app.state.running) return; // already running — cancel via cancel()/Esc
     const tab = app.activeTab();
     if (!tab.sql.trim()) return;
@@ -339,7 +339,8 @@ export function createApp(env = {}) {
     const t0 = now();
     tab.result = newResult(fmt);
     app.state.resultSort = { col: null, dir: 'asc' };
-    app.state.resultView = 'table';
+    // Start in Table unless a caller restores a remembered view (saved-query open).
+    app.state.resultView = (opts && opts.view === 'json') || (opts && opts.view === 'chart') ? opts.view : 'table';
     app.state.running = true;
     app.state.runT0 = t0;
     app.state.runQueryId = cryptoObj.randomUUID ? cryptoObj.randomUUID() : 'q' + t0;

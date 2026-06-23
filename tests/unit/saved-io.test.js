@@ -14,14 +14,18 @@ describe('buildExportDoc', () => {
   it('handles an empty list', () => {
     expect(buildExportDoc([], 'T').queries).toEqual([]);
   });
-  it('carries an optional chart payload, omitting the field when absent', () => {
+  it('carries optional chart + view, omitting them when absent or invalid', () => {
     const chart = { cfg: { type: 'pie', x: 0, y: [1], series: null }, key: 'k' };
     const doc = buildExportDoc([
-      { id: 's1', name: 'A', sql: '1', favorite: false, chart },
-      { id: 's2', name: 'B', sql: '2', favorite: false },
+      { id: 's1', name: 'A', sql: '1', favorite: false, chart, view: 'chart' },
+      { id: 's2', name: 'B', sql: '2', favorite: false, view: 'bogus' }, // invalid view dropped
+      { id: 's3', name: 'C', sql: '3', favorite: false },
     ], 'T');
     expect(doc.queries[0].chart).toEqual(chart);
-    expect('chart' in doc.queries[1]).toBe(false);
+    expect(doc.queries[0].view).toBe('chart');
+    expect('view' in doc.queries[1]).toBe(false);
+    expect('chart' in doc.queries[2]).toBe(false);
+    expect('view' in doc.queries[2]).toBe(false);
   });
 });
 
@@ -49,6 +53,14 @@ describe('parseImportDoc', () => {
     expect(queries[0].chart).toEqual(chart);
     expect(queries[1].chart).toBeUndefined();
     expect(queries[2].chart).toBeUndefined();
+  });
+  it('keeps a known view and drops an unknown one', () => {
+    const { queries } = parseImportDoc(env({ queries: [
+      { name: 'A', sql: '1', view: 'json' },
+      { name: 'B', sql: '2', view: 'wat' },  // not a known view → dropped
+    ] }));
+    expect(queries[0].view).toBe('json');
+    expect(queries[1].view).toBeUndefined();
   });
   it('throws a user message for each invalid envelope', () => {
     expect(() => parseImportDoc('{not json')).toThrow('Not a valid JSON file');
@@ -87,13 +99,16 @@ describe('mergeSaved', () => {
       { id: 's2', name: 'B', sql: '2', favorite: false, chart },
     ];
     const incoming = [
-      { id: 's1', name: 'A2', sql: '1b', favorite: false },                  // no chart → drop
-      { id: 's2', name: 'B2', sql: '2b', favorite: false, chart: chart2 },   // replace
-      { name: 'C', sql: '3', favorite: false, chart },                       // add with chart
+      { id: 's1', name: 'A2', sql: '1b', favorite: false },                                // no chart/view → drop
+      { id: 's2', name: 'B2', sql: '2b', favorite: false, chart: chart2, view: 'json' },   // replace
+      { name: 'C', sql: '3', favorite: false, chart, view: 'chart' },                      // add with chart+view
     ];
     const r = mergeSaved(existing, incoming, () => 'g');
     expect(r.merged.find((q) => q.id === 's1').chart).toBeUndefined();
+    expect(r.merged.find((q) => q.id === 's1').view).toBeUndefined();
     expect(r.merged.find((q) => q.id === 's2').chart).toEqual(chart2);
+    expect(r.merged.find((q) => q.id === 's2').view).toBe('json');
     expect(r.merged.find((q) => q.name === 'C').chart).toEqual(chart);
+    expect(r.merged.find((q) => q.name === 'C').view).toBe('chart');
   });
 });

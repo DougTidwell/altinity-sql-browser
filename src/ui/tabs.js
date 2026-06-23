@@ -51,7 +51,9 @@ export function newTab(app) {
 /**
  * Open a tab pre-seeded with `name`/`sql` (used by saved/history). `savedId`
  * links it to a saved query so the Save button reads "Saved" (restoring a saved
- * query); omit it for history entries, which aren't saved.
+ * query); omit it for history entries, which aren't saved. `chart` is the saved
+ * chart config `{ cfg, key }`, cloned onto the tab. (The result view is a global
+ * setting restored via `run({ view })` by the caller, since `run` resets it.)
  */
 export function loadIntoNewTab(app, name, sql, savedId = null, chart = null) {
   const id = allocTabId(app.state);

@@ -185,6 +185,23 @@ describe('saved queries', () => {
     saveQuery(s, tab, 'Chartd', save, 300);
     expect(s.savedQueries[0].chart).toBeUndefined();
   });
+  it('saveQuery persists the result view (Table/JSON/Chart), updates it, and ignores the transient raw view', () => {
+    const s = createState(reader());
+    const save = vi.fn();
+    const tab = s.tabs[0];
+    tab.sql = 'SELECT 1';
+    s.resultView = 'chart';
+    const e = saveQuery(s, tab, 'V', save, 100);
+    expect(e.view).toBe('chart');
+    // re-save under a different view → updates
+    s.resultView = 'json';
+    saveQuery(s, tab, 'V', save, 200);
+    expect(s.savedQueries[0].view).toBe('json');
+    // raw view (TSV/JSON output) is not a saved view → dropped
+    s.resultView = 'raw';
+    saveQuery(s, tab, 'V', save, 300);
+    expect(s.savedQueries[0].view).toBeUndefined();
+  });
   it('deleteSaved removes + clears tab pointers', () => {
     const s = createState(reader());
     s.savedQueries = [{ id: 's1', sql: 'x', name: 'n' }];

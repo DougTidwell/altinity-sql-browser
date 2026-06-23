@@ -24,12 +24,14 @@ describe('renderSavedHistory', () => {
     const app = makeApp();
     app.state.sidePanel = 'saved';
     const chart = { cfg: { type: 'pie', x: 0, y: [1], series: null }, key: 'k' };
-    app.state.savedQueries = [{ id: 's1', name: 'Q1', sql: 'SELECT 1\n-- more', favorite: false, chart }];
+    app.state.savedQueries = [{ id: 's1', name: 'Q1', sql: 'SELECT 1\n-- more', favorite: false, chart, view: 'chart' }];
     renderSavedHistory(app);
     const row = app.dom.savedList.querySelector('.saved-row');
     expect(row.querySelector('.preview').textContent).toBe('SELECT 1');
     click(row);
-    expect(app.actions.loadIntoNewTab).toHaveBeenCalledWith('Q1', 'SELECT 1\n-- more', 's1', chart); // links the tab + restores chart
+    // links the tab + restores the chart, then runs in the saved view so results show immediately
+    expect(app.actions.loadIntoNewTab).toHaveBeenCalledWith('Q1', 'SELECT 1\n-- more', 's1', chart);
+    expect(app.actions.run).toHaveBeenCalledWith({ view: 'chart' });
     byTitle(row, 'Delete').dispatchEvent(new Event('click', { bubbles: true }));
     expect(app.state.savedQueries).toHaveLength(0);
     expect(app.updateSaveBtn).toHaveBeenCalled();
@@ -128,6 +130,7 @@ describe('renderSavedHistory', () => {
     expect(rows[1].textContent).not.toContain('rows');
     click(rows[0]);
     expect(app.actions.loadIntoNewTab).toHaveBeenCalledWith('From history', 'SELECT 1');
+    expect(app.actions.run).toHaveBeenCalled(); // re-runs on restore
   });
 
   it('history: per-row delete removes just that entry without loading it', () => {

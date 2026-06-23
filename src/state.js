@@ -12,6 +12,9 @@ export function tabChart(tab) {
   return tab && tab.chartCfg ? { cfg: cloneChartCfg(tab.chartCfg), key: tab.chartKey ?? null } : null;
 }
 
+/** Result views a saved query can remember (the raw TSV/JSON view is transient). */
+export const SAVED_VIEWS = new Set(['table', 'json', 'chart']);
+
 export const KEYS = {
   theme: 'asb:theme',
   sidebarPx: 'asb:sidebarPx',
@@ -91,14 +94,19 @@ export function saveQuery(state, tab, name, save = saveJSON, now = Date.now()) {
   const nm = String(name || '').trim();
   if (!sql || !nm) return null;
   const chart = tabChart(tab);
+  // Remember the current result view (Table/JSON/Chart) so a restore reopens the
+  // same data representation; the transient raw view isn't persisted.
+  const view = SAVED_VIEWS.has(state.resultView) ? state.resultView : undefined;
   let entry = savedForTab(state, tab);
   if (entry) {
     entry.name = nm;
     entry.sql = sql;
     if (chart) entry.chart = chart; else delete entry.chart;
+    if (view) entry.view = view; else delete entry.view;
   } else {
     entry = { id: makeId('s', now), name: nm, sql, favorite: false };
     if (chart) entry.chart = chart;
+    if (view) entry.view = view;
     state.savedQueries.unshift(entry);
     tab.savedId = entry.id;
   }
