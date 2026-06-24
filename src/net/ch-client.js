@@ -174,7 +174,8 @@ function firstLine(s) {
  * (loadEntityDoc, #27). Each source is best-effort; a missing/denied system
  * table yields null for that piece and the caller (assembleReferenceData) falls
  * back to the built-in set.
- * Returns { keywords: string[]|null, functions: {name:{kind,sig,ret,desc}}|null }.
+ * Returns { keywords, functions, formats } — each null when its source is
+ * missing/denied (the caller falls back to a built-in set).
  */
 export async function loadReferenceData(ctx) {
   const kw = await tryQueryData(ctx, 'SELECT keyword FROM system.keywords FORMAT JSON');
@@ -196,7 +197,11 @@ export async function loadReferenceData(ctx) {
       };
     }
   }
-  return { keywords, functions };
+  // Output format names for FORMAT-clause completion (system.formats); a separate
+  // catalog from keywords/functions, so it needs its own fetch.
+  const fmts = await tryQueryData(ctx, 'SELECT name FROM system.formats WHERE is_output ORDER BY name FORMAT JSON');
+  const formats = fmts ? fmts.map((r) => r.name) : null;
+  return { keywords, functions, formats };
 }
 
 /**
@@ -231,11 +236,14 @@ export async function loadEntityDoc(ctx, name, sqlString) {
 export async function runQuery(ctx, sql, o = {}) {
   const fmt = o.format || 'Table';
   const isStreaming = fmt === 'Table';
+  // Streaming gets the progress-bearing JSON; raw mode sends the requested format
+  // verbatim as default_format (a real ClickHouse format name from a FORMAT clause
+  // or an implicit EXPLAIN). 'TSV' keeps its with-names-and-types expansion.
   const fmtParam = isStreaming
     ? 'JSONStringsEachRowWithProgress'
     : fmt === 'TSV'
       ? 'TabSeparatedWithNamesAndTypes'
-      : 'JSONCompact';
+      : fmt;
   const url = chUrl(ctx.origin, {
     format: fmtParam,
     // wait_end_of_query buffers the whole response server-side so the HTTP

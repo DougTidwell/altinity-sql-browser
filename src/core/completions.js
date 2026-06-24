@@ -11,6 +11,22 @@ import { SQL_KEYWORDS, SQL_FUNCS } from './sql-highlight.js';
 const BUILTIN_KEYWORDS = [...SQL_KEYWORDS];
 const BUILTIN_FUNCS = [...SQL_FUNCS];
 
+// Common ClickHouse output formats — the fallback for FORMAT-clause completion
+// when system.formats isn't available (offline / old server / denied). The live
+// set (all is_output formats) replaces this once a connection loads.
+const BUILTIN_FORMATS = [
+  'CSV', 'CSVWithNames', 'JSON', 'JSONCompact', 'JSONEachRow', 'Markdown', 'Null',
+  'Parquet', 'Pretty', 'PrettyCompact', 'TabSeparated', 'TabSeparatedWithNames',
+  'TSV', 'TSVWithNames', 'Values', 'Vertical', 'XML',
+];
+
+// Clause keywords that share a name with an obscure function — typing the prefix
+// almost always means the clause, so let the keyword win that tie once the user
+// has typed enough to mean it. Deliberately tiny: most keyword/function name
+// clashes (min, max, replace, left, in, like, …) should keep favoring the
+// function, so only FORMAT (clause vs the rarely-used format() function) is here.
+const PREFER_KEYWORD = new Set(['FORMAT']);
+
 // Built-in hover docs for a few ClickHouse-specific keywords (#27). There's no
 // server table for keyword docs, so this static set covers the high-value ones;
 // function docs come from system.functions (loaded per connection).
@@ -27,10 +43,12 @@ const KEYWORD_DOCS = {
  * Turn a loaded reference payload (or null) into the editor's in-memory shape:
  *   { keywords: string[],            // completion candidates
  *     functions: { name: {kind,sig,ret,desc} },
+ *     formats: string[],             // output formats for FORMAT-clause completion
+ *     keywordDocs: { KW: doc },      // static hover docs
  *     keywordSet: Set<UPPER>,        // tokenizer highlight lookup
  *     funcSet: Set<name> }           // tokenizer highlight lookup
  * Missing pieces fall back to the built-in sets so highlighting + keyword/
- * function completion still work offline / on older ClickHouse.
+ * function/format completion still work offline / on older ClickHouse.
  */
 export function assembleReferenceData(loaded) {
   const keywords = loaded && loaded.keywords && loaded.keywords.length
@@ -39,9 +57,11 @@ export function assembleReferenceData(loaded) {
   const functions = loaded && loaded.functions && Object.keys(loaded.functions).length
     ? loaded.functions
     : Object.fromEntries(BUILTIN_FUNCS.map((name) => [name, { kind: 'fn', sig: name + '()', ret: '', desc: '' }]));
+  const formats = loaded && loaded.formats && loaded.formats.length ? loaded.formats : BUILTIN_FORMATS;
   return {
     keywords,
     functions,
+    formats,
     keywordDocs: KEYWORD_DOCS, // for hover docs (#27); static built-in set
     keywordSet: new Set(keywords.map((k) => k.toUpperCase())),
     funcSet: new Set(Object.keys(functions)),
@@ -65,7 +85,12 @@ export function buildCompletions(ref, schema) {
     // the parenthesised params — `(s, offset[, …])`, not `substring(s, …)` (#26).
     const sig = m.sig || name + '()';
     const paren = sig.indexOf('(');
-    items.push({ label: name, kind, insert: name + '(', detail: paren >= 0 ? sig.slice(paren) : sig, doc: m.desc || '', ret: m.ret || '' });
+    // Insert `name()` and (via caretBack) leave the caret between the parens — a
+    // matched pair like typing `(` gives, so accepting never strands a lone `(`.
+    items.push({ label: name, kind, insert: name + '()', caretBack: 1, detail: paren >= 0 ? sig.slice(paren) : sig, doc: m.desc || '', ret: m.ret || '' });
+  }
+  for (const name of ref.formats || []) {
+    items.push({ label: name, kind: 'format', insert: name, detail: 'format' });
   }
   for (const db of schema || []) {
     items.push({ label: db.db, kind: 'db', insert: db.db, detail: 'database' });
@@ -82,13 +107,22 @@ export function buildCompletions(ref, schema) {
 }
 
 /**
- * The word being typed at the caret, and whether it is qualified (after a dot —
- * `table.` → that table's columns). Returns {word, from, to, qualified, parent}.
+ * The word being typed at the caret, whether it is qualified (after a dot —
+ * `table.` → that table's columns), and whether it sits inside a FORMAT clause
+ * (`afterFormat` — the preceding token is FORMAT → complete output-format names).
+ * Returns {word, from, to, qualified, parent, afterFormat}.
  */
 export function completionContext(value, pos) {
   let s = pos;
   while (s > 0 && /[A-Za-z0-9_]/.test(value[s - 1])) s--;
   const word = value.slice(s, pos);
+  // Inside a FORMAT clause? (the identifier just before the word is `FORMAT`) →
+  // complete output-format names instead of the general candidate set.
+  let b = s;
+  while (b > 0 && /\s/.test(value[b - 1])) b--;
+  let pf = b;
+  while (pf > 0 && /[A-Za-z0-9_]/.test(value[pf - 1])) pf--;
+  const afterFormat = value.slice(pf, b).toUpperCase() === 'FORMAT';
   let qualified = false;
   let parent = null;
   if (value[s - 1] === '.') {
@@ -100,7 +134,7 @@ export function completionContext(value, pos) {
     // and an empty dropdown — fall back to normal completion instead (#4 review).
     if (name) { qualified = true; parent = name; }
   }
-  return { word, from: s, to: pos, qualified, parent };
+  return { word, from: s, to: pos, qualified, parent, afterFormat };
 }
 
 /**
@@ -115,17 +149,29 @@ export function rankCompletions(items, ctx) {
     const cols = items.filter((it) => it.kind === 'column' && it.parent === ctx.parent);
     return (w ? cols.filter((c) => c.label.toLowerCase().includes(w)) : cols).slice(0, 50);
   }
+  if (ctx.afterFormat) {
+    // FORMAT clause: only output-format names, prefix matches first.
+    const fmts = items.filter((it) => it.kind === 'format' && (!w || it.label.toLowerCase().includes(w)));
+    if (w) fmts.sort((a, b) => a.label.toLowerCase().indexOf(w) - b.label.toLowerCase().indexOf(w) || a.label.localeCompare(b.label));
+    return fmts.slice(0, 50);
+  }
   if (!w) {
     return items.filter((it) => it.kind === 'keyword' || it.kind === 'table').slice(0, 40);
   }
   const scored = [];
   for (const it of items) {
+    if (it.kind === 'format') continue; // formats only inside a FORMAT clause
     const l = it.label.toLowerCase();
     const idx = l.indexOf(w);
     if (idx === -1) continue;
     let score = idx === 0 ? 0 : 100 + idx;              // prefix beats substring
     if (it.kind === 'column' || it.kind === 'table') score -= 10; // boost schema
-    if (it.kind === 'keyword') score += 5;
+    if (it.kind === 'keyword') {
+      // A clause keyword sharing a name with an obscure function wins the tie
+      // once enough of it is typed (≥3 chars, prefix) — e.g. `for` → FORMAT, not
+      // the format() function or formatDateTime; shorter prefixes stay neutral.
+      score += (idx === 0 && w.length >= 3 && PREFER_KEYWORD.has(it.label.toUpperCase())) ? -50 : 5;
+    }
     score += (l.length - w.length) * 0.1;               // prefer closer length
     scored.push({ it, score });
   }
