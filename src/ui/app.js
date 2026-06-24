@@ -382,8 +382,10 @@ export function createApp(env = {}) {
     const t0 = now();
     tab.result = newResult(fmt);
     app.state.resultSort = { col: null, dir: 'asc' };
-    // Start in Table unless a caller restores a remembered view (saved-query open).
-    app.state.resultView = (opts && opts.view === 'json') || (opts && opts.view === 'chart') ? opts.view : 'table';
+    // Keep the current Table/JSON/Chart tab across re-runs (#34); a saved-query
+    // open passes its remembered view in opts.view to restore that instead.
+    const view = opts && opts.view;
+    app.state.resultView = ['table', 'json', 'chart'].includes(view) ? view : app.state.resultView;
     app.state.running = true;
     app.state.runT0 = t0;
     app.state.runQueryId = cryptoObj.randomUUID ? cryptoObj.randomUUID() : 'q' + t0;

@@ -273,19 +273,21 @@ describe('query run', () => {
     expect(app.activeTab().result.rows).toEqual([['1']]);
     expect(app.state.history.length).toBe(1);
   });
-  it('opens in a restored result view, defaulting to table for an unknown/absent view', async () => {
+  it('keeps the current result view on a plain re-run, and restores a remembered view when opened (#34)', async () => {
     const routes = [[(u, sql) => /SELECT 1/.test(sql), resp({ body: streamBody(['{"meta":[{"name":"a","type":"UInt8"}]}\n', '{"row":{"a":"1"}}\n']) })]];
-    const { app } = appForRun(routes);
+    const { app } = appForRun(routes, { Chart: class { destroy() {} } }); // Chart seam so the chart view renders
     app.activeTab().sql = 'SELECT 1';
     app.state.resultView = 'chart';
-    await app.actions.run();                  // no opts → resets to table
-    expect(app.state.resultView).toBe('table');
-    await app.actions.run({ view: 'chart' }); // restore a saved chart view
+    await app.actions.run();                  // no opts → keep the current (chart) tab
     expect(app.state.resultView).toBe('chart');
-    await app.actions.run({ view: 'json' });
+    await app.actions.run({ view: 'json' });  // saved-query open restores its view
     expect(app.state.resultView).toBe('json');
-    await app.actions.run({ view: 'bogus' }); // unknown view → table
+    await app.actions.run({ view: 'table' });
     expect(app.state.resultView).toBe('table');
+    await app.actions.run({ view: 'chart' });
+    expect(app.state.resultView).toBe('chart');
+    await app.actions.run({ view: 'bogus' }); // unknown view → keep current (chart)
+    expect(app.state.resultView).toBe('chart');
   });
   it('no-ops on empty SQL', async () => {
     const { app } = appForRun([]);
