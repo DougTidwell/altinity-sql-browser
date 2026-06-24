@@ -619,14 +619,8 @@ body {
   color: var(--fg); white-space: pre;
   background: var(--bg);
 }
-.tsv-view {
-  height: 100%; overflow: auto; padding: 12px 14px;
-  font-family: var(--mono); font-size: 11.5px;
-  color: var(--fg); white-space: pre; tab-size: 8;
-  background: var(--bg);
-}
 /* tabindex makes the pane keyboard-scrollable; suppress the focus ring. */
-.raw-text-view:focus, .json-view:focus, .tsv-view:focus { outline: none; }
+.raw-text-view:focus, .json-view:focus { outline: none; }
 
 /* ------------ chart view ------------ */
 /* `.res-body` is display:block, so height:100% (not flex:1) is what lets the

@@ -387,7 +387,7 @@ export function createApp(env = {}) {
     // Keep the current Table/JSON/Chart tab across re-runs (#34); a saved-query
     // open passes its remembered view in opts.view to restore that instead.
     const view = opts && opts.view;
-    app.state.resultView = ['table', 'json', 'chart', 'tsv'].includes(view) ? view : app.state.resultView;
+    app.state.resultView = ['table', 'json', 'chart'].includes(view) ? view : app.state.resultView;
     app.state.running = true;
     app.state.runT0 = t0;
     app.state.runQueryId = cryptoObj.randomUUID ? cryptoObj.randomUUID() : 'q' + t0;

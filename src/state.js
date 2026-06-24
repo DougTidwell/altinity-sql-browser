@@ -13,7 +13,7 @@ export function tabChart(tab) {
 }
 
 /** Result views a saved query can remember (a raw FORMAT-clause view is transient). */
-export const SAVED_VIEWS = new Set(['table', 'json', 'chart', 'tsv']);
+export const SAVED_VIEWS = new Set(['table', 'json', 'chart']);
 
 export const KEYS = {
   theme: 'asb:theme',
