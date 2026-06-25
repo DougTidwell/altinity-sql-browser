@@ -1,6 +1,6 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import dagre from '@dagrejs/dagre';
-import { renderExplainGraph, openPipelineFullscreen } from '../../src/ui/explain-graph.js';
+import { renderExplainGraph, openPipelineFullscreen, renderSchemaGraph, openSchemaFullscreen } from '../../src/ui/explain-graph.js';
 
 const APP = { document, Dagre: dagre }; // app stub carrying the dagre layout seam
 
@@ -155,7 +155,72 @@ describe('openPipelineFullscreen', () => {
     expect(document.body.contains(overlay)).toBe(true);
     expect(overlay.querySelector('svg.explain-graph')).toBeNull();
     expect(overlay.querySelector('.graph-overlay-zoom')).toBeNull();
-    expect(overlay.textContent).toMatch(/No pipeline graph/);
+    expect(overlay.textContent).toMatch(/Nothing to display/);
+    overlay.querySelector('.graph-overlay-close').dispatchEvent(new Event('click', { bubbles: true }));
+    expect(document.body.contains(overlay)).toBe(false);
+  });
+});
+
+describe('schema lineage graph', () => {
+  afterEach(() => { document.body.innerHTML = ''; });
+  const GRAPH = {
+    focus: { kind: 'db', db: 'lin' },
+    nodes: [
+      { id: 'lin.a', label: 'a', kind: 'table' },
+      { id: 'lin.mv', label: 'mv', kind: 'mv' },
+      { id: 'lin.dst', label: 'dst', kind: 'table' },
+    ],
+    edges: [
+      { from: 'lin.a', to: 'lin.mv', kind: 'feeds' },
+      { from: 'lin.mv', to: 'lin.dst', kind: 'writes' },
+    ],
+  };
+
+  it('draws kind-coloured nodes, relationship-coloured edges, edge labels, and a legend', () => {
+    const el = renderSchemaGraph(APP, { schemaGraph: GRAPH });
+    expect(el.className).toContain('schema-graph-view');
+    expect(el.querySelector('svg.explain-graph')).not.toBeNull();
+    expect(el.querySelector('rect.eg-node--mv')).not.toBeNull();
+    expect(el.querySelector('rect.eg-node--table')).not.toBeNull();
+    expect(el.querySelector('path.eg-edge--writes')).not.toBeNull();
+    expect([...el.querySelectorAll('text.eg-edge-label')].map((t) => t.textContent)).toContain('feeds');
+    expect(el.querySelector('.schema-graph-legend')).not.toBeNull();
+  });
+
+  it('clicking a node runs SHOW CREATE for it (insertCreate) into the editor', () => {
+    const actions = { insertCreate: vi.fn() };
+    const el = renderSchemaGraph({ document, Dagre: dagre, actions }, { schemaGraph: GRAPH });
+    el.querySelector('rect.eg-node--mv').dispatchEvent(new Event('click', { bubbles: true }));
+    expect(actions.insertCreate).toHaveBeenCalledWith('lin.mv');
+  });
+
+  it('a plain drag does not pan (click selects); ⌘/Ctrl-drag pans', () => {
+    const el = renderSchemaGraph({ document, Dagre: dagre, actions: { insertCreate: vi.fn() } }, { schemaGraph: GRAPH });
+    const svg = el.querySelector('svg.explain-graph');
+    el.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 200, right: 400, bottom: 200 });
+    const vbX = () => svg.getAttribute('viewBox').split(' ').map(Number)[0];
+    const x0 = vbX();
+    // plain drag → no pan (modifierPan gate blocks the mousedown)
+    el.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 100, bubbles: true }));
+    el.dispatchEvent(new MouseEvent('mousemove', { clientX: 40, clientY: 100, bubbles: true }));
+    expect(vbX()).toBe(x0);
+    // ⌘-drag → pans
+    el.dispatchEvent(new MouseEvent('mousedown', { clientX: 100, clientY: 100, metaKey: true, bubbles: true }));
+    el.dispatchEvent(new MouseEvent('mousemove', { clientX: 40, clientY: 100, bubbles: true }));
+    expect(vbX()).not.toBe(x0);
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+
+  it('shows a placeholder for an empty graph', () => {
+    const el = renderSchemaGraph(APP, { schemaGraph: { focus: {}, nodes: [], edges: [] } });
+    expect(el.className).toBe('placeholder');
+  });
+
+  it('openSchemaFullscreen mounts an overlay with the legend and closes', () => {
+    const overlay = openSchemaFullscreen({ document, Dagre: dagre, actions: { showSchemaGraph: vi.fn() } }, GRAPH);
+    expect(document.body.contains(overlay)).toBe(true);
+    expect(overlay.querySelector('svg.explain-graph')).not.toBeNull();
+    expect(overlay.querySelector('.schema-graph-legend')).not.toBeNull();
     overlay.querySelector('.graph-overlay-close').dispatchEvent(new Event('click', { bubbles: true }));
     expect(document.body.contains(overlay)).toBe(false);
   });
