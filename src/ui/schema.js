@@ -74,16 +74,17 @@ export function renderSchema(app) {
   const matches = (s) => !filter || s.toLowerCase().includes(filter);
 
   for (const db of state.schema) {
+    const qdb = quoteIdent(db.db); // SQL-safe db name (reused by the 3 emit sites)
     list.appendChild(h('div', {
       class: 'tree-row bold',
       title: 'Click to expand · double-click to insert · shift-click for SHOW CREATE',
       onclick: (e) => {
-        if (e.shiftKey) { app.actions.insertCreate('DATABASE ' + quoteIdent(db.db)); return; }
-        if (isDoubleClick(app, 'db:' + db.db)) { app.actions.insertAtCursor(quoteIdent(db.db)); return; }
+        if (e.shiftKey) { app.actions.insertCreate('DATABASE ' + qdb); return; }
+        if (isDoubleClick(app, 'db:' + db.db)) { app.actions.insertAtCursor(qdb); return; }
         db.expanded = !db.expanded;
         renderSchema(app);
       },
-      ...lineageDrag(quoteIdent(db.db), { kind: 'db', db: db.db }),
+      ...lineageDrag(qdb, { kind: 'db', db: db.db }),
     },
       ...treeRow(Icon.database(), db.db, String(db.tables.length), { expanded: db.expanded }),
     ));

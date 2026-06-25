@@ -165,10 +165,11 @@ describe('schema lineage graph', () => {
   afterEach(() => { document.body.innerHTML = ''; });
   const GRAPH = {
     focus: { kind: 'db', db: 'lin' },
+    // nodes carry db/name separately, as buildSchemaGraph produces them
     nodes: [
-      { id: 'lin.a', label: 'a', kind: 'table' },
-      { id: 'lin.mv', label: 'mv', kind: 'mv' },
-      { id: 'lin.dst', label: 'dst', kind: 'table' },
+      { id: 'lin.a', label: 'a', kind: 'table', db: 'lin', name: 'a' },
+      { id: 'lin.mv', label: 'mv', kind: 'mv', db: 'lin', name: 'mv' },
+      { id: 'lin.dst', label: 'dst', kind: 'table', db: 'lin', name: 'dst' },
     ],
     edges: [
       { from: 'lin.a', to: 'lin.mv', kind: 'feeds' },
@@ -196,7 +197,7 @@ describe('schema lineage graph', () => {
 
   it('clicking a node with a non-bare name backtick-quotes the SHOW CREATE target', () => {
     const actions = { insertCreate: vi.fn() };
-    const g = { focus: { kind: 'db', db: 'target_all' }, nodes: [{ id: 'target_all.a-b.parquet', label: 'a-b.parquet', kind: 'table' }], edges: [] };
+    const g = { focus: { kind: 'db', db: 'target_all' }, nodes: [{ id: 'target_all.a-b.parquet', label: 'a-b.parquet', kind: 'table', db: 'target_all', name: 'a-b.parquet' }], edges: [] };
     const el = renderSchemaGraph({ document, Dagre: dagre, actions }, { schemaGraph: g });
     el.querySelector('rect.eg-node--table').dispatchEvent(new Event('click', { bubbles: true }));
     expect(actions.insertCreate).toHaveBeenCalledWith('target_all.`a-b.parquet`');

@@ -195,6 +195,19 @@ describe('buildSchemaGraph', () => {
     expect(() => buildSchemaGraph(rows, { kind: 'db', db: 'lin' })).not.toThrow();
   });
 
+  it('table-focus on a dotted-name table keeps the center + its 1-hop (not empty)', () => {
+    const rows = { tables: [
+      T('target_all', 'part-0.snappy.parquet', 'MergeTree', { dependencies_database: ['target_all'], dependencies_table: ['v_over_parquet'] }),
+      T('target_all', 'v_over_parquet', 'View'),
+      T('target_all', 'unrelated', 'MergeTree'),
+    ], dictionaries: [] };
+    const g = buildSchemaGraph(rows, { kind: 'table', db: 'target_all', table: 'part-0.snappy.parquet' });
+    const ids = new Set(g.nodes.map((n) => n.id));
+    expect(ids.has('target_all.part-0.snappy.parquet')).toBe(true); // center kept its db prefix
+    expect(ids.has('target_all.v_over_parquet')).toBe(true);        // 1-hop neighbour
+    expect(ids.has('target_all.unrelated')).toBe(false);
+  });
+
   it('keeps the db prefix for a dependency whose table name contains dots', () => {
     // dependencies_* carry the db separately, so a dotted table name (a parquet
     // file table) must still join to db.<name>, not be mistaken for db-qualified.

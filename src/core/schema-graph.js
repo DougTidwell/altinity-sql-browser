@@ -77,9 +77,10 @@ export function parseEngineRef(engine, engineFull) {
 // drops an edge rather than mis-linking.
 const qualify = (db, name) => (name && name.includes('.') ? name : db + '.' + name);
 // A reference whose db is always supplied separately (dependencies_*, engine
-// args) — join unconditionally so a dotted table name (`…snappy.parquet`) keeps
-// its db prefix instead of being mistaken for an already-qualified ref.
-const joinId = (db, name) => (db ? db + '.' + name : name);
+// args, table-focus center) — join unconditionally so a dotted table name
+// (`…snappy.parquet`) keeps its db prefix instead of being mistaken for an
+// already-qualified ref. Always emits a dot (like rowId) so node() can split it.
+const joinId = (db, name) => db + '.' + name;
 const rowId = (r) => r.database + '.' + r.name;
 
 /**
@@ -193,7 +194,10 @@ export function buildSchemaGraph(rows, focus) {
   let outNodes = [...nodes.values()];
   let outEdges = edges;
   if (focus && focus.kind === 'table') {
-    const center = qualify(focus.db, focus.table);
+    // focus.table is always a bare name (db is separate in the drag payload), so
+    // join unconditionally — a dotted table name (`…snappy.parquet`) must keep its
+    // db prefix to match the rowId-built node ids, or the 1-hop filter finds nothing.
+    const center = joinId(focus.db, focus.table);
     const keep = new Set([center]);
     for (const e of edges) { if (e.from === center) keep.add(e.to); if (e.to === center) keep.add(e.from); }
     outNodes = outNodes.filter((n) => keep.has(n.id));
