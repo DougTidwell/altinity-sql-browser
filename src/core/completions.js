@@ -6,8 +6,8 @@
 // path — never a query per keystroke. `assembleReferenceData` falls back to the
 // built-in tokenizer sets when the server didn't supply them.
 
-import { SQL_KEYWORDS, SQL_FUNCS } from './sql-highlight.js';
-import { quoteIdent } from './format.js';
+import { SQL_KEYWORDS, SQL_FUNCS, tokenize } from './sql-highlight.js';
+import { quoteIdent, unquoteIdent } from './format.js';
 
 const BUILTIN_KEYWORDS = [...SQL_KEYWORDS];
 const BUILTIN_FUNCS = [...SQL_FUNCS];
@@ -116,28 +116,72 @@ export function buildCompletions(ref, schema) {
  * Returns {word, from, to, qualified, parent, afterFormat}.
  */
 export function completionContext(value, pos) {
-  let s = pos;
-  while (s > 0 && /[A-Za-z0-9_]/.test(value[s - 1])) s--;
-  const word = value.slice(s, pos);
+  // The word being typed is either inside an OPEN backtick-quoted identifier (a
+  // `non-bare-name… still being typed) or a bare [A-Za-z0-9_] run. We use the SQL
+  // tokenizer to find an open backtick so a backtick inside a string/comment (or
+  // an escaped `\`` in a closed name) can't fool us. `from` is where an accepted
+  // candidate replaces to — the opening backtick in the quoted case, so accepting
+  // never doubles the backtick.
+  const open = openBacktickStart(value, pos);
+  let from;
+  let word;
+  if (open >= 0) {
+    from = open;
+    word = value.slice(from + 1, pos); // partial name, unquoted
+  } else {
+    from = pos;
+    while (from > 0 && /[A-Za-z0-9_]/.test(value[from - 1])) from--;
+    word = value.slice(from, pos);
+  }
   // Inside a FORMAT clause? (the identifier just before the word is `FORMAT`) →
   // complete output-format names instead of the general candidate set.
-  let b = s;
+  let b = from;
   while (b > 0 && /\s/.test(value[b - 1])) b--;
   let pf = b;
   while (pf > 0 && /[A-Za-z0-9_]/.test(value[pf - 1])) pf--;
   const afterFormat = value.slice(pf, b).toUpperCase() === 'FORMAT';
+  // Qualified? An identifier (bare OR backtick-quoted) then a dot immediately
+  // before the word. parent is the unquoted table name, matched against item.parent.
   let qualified = false;
   let parent = null;
-  if (value[s - 1] === '.') {
-    let p = s - 1;
-    while (p > 0 && /[A-Za-z0-9_]/.test(value[p - 1])) p--;
-    const name = value.slice(p, s - 1);
+  if (value[from - 1] === '.') {
     // Only qualified when a real identifier precedes the dot. A bare '.' after a
-    // non-identifier (`.col`, `).c`, `count().c`) would otherwise yield parent=''
-    // and an empty dropdown — fall back to normal completion instead (#4 review).
+    // non-identifier (`.col`, `).c`, `count().c`) yields '' → normal completion.
+    const name = identBefore(value, from - 1);
     if (name) { qualified = true; parent = name; }
   }
-  return { word, from: s, to: pos, qualified, parent, afterFormat };
+  return { word, from, to: pos, qualified, parent, afterFormat };
+}
+
+// The start index of an OPEN (still-being-typed) backtick-quoted identifier that
+// contains the caret, or -1. Uses the tokenizer so a backtick inside a string or
+// comment isn't mistaken for an identifier quote, and an escaped `\`` inside a
+// closed name doesn't desync a naive parity count.
+function openBacktickStart(value, pos) {
+  let off = 0;
+  for (const [type, text] of tokenize(value)) {
+    const end = off + text.length;
+    if (off < pos && pos <= end && type === 'ident' && text[0] === '`') {
+      // open = the caret is inside the run before any closing backtick (an
+      // unterminated `name… token, or the caret sits before its trailing `).
+      const closedAtEnd = pos === end && text.length > 1 && text[text.length - 1] === '`';
+      if (!closedAtEnd) return off;
+    }
+    off = end;
+  }
+  return -1;
+}
+
+// The identifier ending at index `end` (exclusive): a backtick-quoted run
+// (returned unquoted/unescaped) or a bare [A-Za-z0-9_] run. '' if neither.
+function identBefore(value, end) {
+  if (value[end - 1] === '`') {
+    const open = value.lastIndexOf('`', end - 2);
+    if (open >= 0) return unquoteIdent(value.slice(open, end));
+  }
+  let p = end;
+  while (p > 0 && /[A-Za-z0-9_]/.test(value[p - 1])) p--;
+  return value.slice(p, end);
 }
 
 /**
