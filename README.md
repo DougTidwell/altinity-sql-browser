@@ -168,6 +168,34 @@ npm run build          # → dist/sql.html (single file)
 npm run dev            # build + serve dist/ at http://localhost:8900
 ```
 
+### Run locally against your own ClickHouse
+
+`npm run local` builds the SPA and serves it as a static page on localhost:
+
+```bash
+npm run local          # build + serve → open http://localhost:8900/sql
+```
+
+The app is a thin client — queries go straight from the browser to the chosen
+ClickHouse — so the local server only serves the page plus a generated
+`config.json`. It reads your **`~/.clickhouse-client/config.xml`** connections and
+offers them as a **Saved connection** dropdown on the login screen:
+
+- A plain connection (`hostname`/`user`/`password`) → prefills the credentials
+  form (cross-origin HTTP Basic to that host).
+- A connection carrying clickhouse-client's OAuth keys (`oauth-url`,
+  `oauth-client-id`, `oauth-audience`) → an OAuth sign-in against that cluster.
+
+You can also ignore the picker and type a host/user/password by hand (host: include
+the scheme, e.g. `http://localhost:8123`; a bare host defaults to
+`https://<host>:8443`).
+
+The target ClickHouse must allow cross-origin requests — ClickHouse's HTTP
+interface sends `Access-Control-Allow-Origin` for requests with an `Origin` header
+by default, so a stock server works. For an **OAuth** connection you also register
+`http://localhost:8900/sql` as a redirect URI with the IdP. Override the serve port
+with `PORT` and the config path with `LOCAL_CH_CONFIG`. Ctrl-C stops it.
+
 ## Installing on any ClickHouse cluster
 
 ```bash
