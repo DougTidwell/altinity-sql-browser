@@ -1,8 +1,8 @@
 # Contributor guide — altinity-sql-browser
 
 A modular ES-module SPA that builds to one self-contained HTML file served from
-ClickHouse. No framework; runtime deps are rare and deliberate (currently two,
-both bundled — see hard rule 4). Quality is held by tests.
+ClickHouse. No framework; runtime deps are rare and deliberate (currently three,
+all bundled — see hard rule 4). Quality is held by tests.
 
 ## Hard rules
 
@@ -22,9 +22,11 @@ both bundled — see hard rule 4). Quality is held by tests.
    (see README "Configuring OAuth").
 4. **The build is esbuild only; runtime deps are rare and deliberate.** Source
    files are the tested files; esbuild bundles `src/main.js` → `dist/sql.html`.
-   There are **two** bundled runtime dependencies — **Chart.js** (the Chart
-   result view) and **@dagrejs/dagre** (the EXPLAIN pipeline-graph layout) — both
-   inlined into the artifact, so the page still makes zero third-party requests.
+   There are **three** bundled runtime dependencies — **Chart.js** (the Chart
+   result view), **@dagrejs/dagre** (the EXPLAIN pipeline-graph layout), and
+   **@preact/signals-core** (the reactivity primitive — see
+   `docs/ADR-0001-reactivity.md`) — all inlined into the artifact, so the page
+   still makes zero third-party requests.
    Adding *another* runtime dependency is a deliberate decision (it grows the
    single served file) — don't do it casually. When a feature needs a library,
    keep the testable logic pure in `src/core/` (chart axis/role/pivot math in
@@ -32,6 +34,20 @@ both bundled — see hard rule 4). Quality is held by tests.
    100%-covered) and make the library call an **injected seam** (`app.Chart` /
    `app.Dagre`, like the fetch/crypto seams) so the DOM wrapper stays fully tested
    rather than dropping below the coverage gate.
+5. **No UI framework; signals for state, imperative adapters for islands.** State
+   reactivity is `@preact/signals-core` (`signal`/`effect`/`computed`/`batch`),
+   migrated slice-by-slice (ADR-0001). **No React/Preact/Solid** — a Preact spike
+   on the schema panel (`spike/preact-schema`, ADR-0001 addendum) confirmed a
+   component model removes the in-place-mutation pain but buys a second render
+   paradigm the roadmap doesn't justify. The hard, third-party, or
+   high-frequency-pointer surfaces (the editor, the EXPLAIN/schema graphs,
+   Chart.js, result-grid resize/sort) stay **imperative behind an injected seam** —
+   signals coordinate state, they don't own every mousemove. CodeMirror 6 is the
+   pre-approved next runtime dep, behind an `EditorPort` seam, to land when
+   schema-aware autocomplete (#84) does (#21). When a *second* consumer of a
+   complex UI pattern appears, extract a shared primitive (e.g. `EditorPort`,
+   `GraphSurface`, a result-view registry, `Drawer`) rather than copy it — but
+   don't build a primitive speculatively for a single caller.
 
 ## How to add a result view / panel / feature
 
@@ -57,3 +73,20 @@ Touch these in one change:
 
 Pure-by-construction modules, injected side-effect seams, per-file coverage
 thresholds, and a single ClickHouse-served artifact built by esbuild.
+
+## Working discipline
+
+- **Surface out-of-scope findings, don't bury them.** Spot a real bug, data
+  inconsistency, deprecated API, or future footgun outside the current task →
+  open an issue labeled `inbox` (file:line + why deferred) and tell the user.
+  High signal only, not style nits.
+- **Reconcile forward work after a substantive change.** A change to behavior,
+  schema, or a settled decision can stale tracked work. In the same commit,
+  reconcile what it reshaped: the roadmap meta-issue (currently #68) — re-check
+  or re-scope the track it touches; the affected issue's body (Goal/Acceptance);
+  the relevant ADR addendum and `CHANGELOG.md` `[Unreleased]`; and any issue it
+  obsoletes (close via "Closes #N" in the PR). Flag it if the rework is large.
+  (Trivial typo/comment changes exempt.)
+- **Convert friction into memory.** If a task needed retried commits or hit an
+  unexpected failure (test/env/scope surprise), save a memory so the next
+  session doesn't repeat it.

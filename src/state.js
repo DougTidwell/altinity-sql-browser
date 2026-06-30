@@ -6,6 +6,7 @@ import { clamp } from './core/format.js';
 import { mergeSaved } from './core/saved-io.js';
 import { cloneChartCfg } from './core/chart-data.js';
 import { loadJSON, saveJSON, loadStr, saveStr } from './core/storage.js';
+import { signal } from '@preact/signals-core';
 
 /** A tab's chart state as a persistable payload `{ cfg, key }`, or null. */
 export function tabChart(tab) {
@@ -48,29 +49,37 @@ export function createState(read = { loadJSON, loadStr }) {
     sidebarPx: clamp(parseInt(read.loadStr(KEYS.sidebarPx, '248'), 10), 180, 420),
     editorPct: num(KEYS.editorPct, 45, 15, 85),
     sideSplitPct: num(KEYS.sideSplitPct, 58, 25, 85),
-    tabs: [newTabObj('t1')],
-    activeTabId: 't1',
+    // Reactive (signals): mutating these drives repaints via effects in
+    // createApp — no manual refresh() list to keep in sync. Read/write through
+    // `.value`. tabs/activeTabId drive renderTabs + the editor + the save button;
+    // the results pane + Run button react to resultView/running (below).
+    tabs: signal([newTabObj('t1')]),
+    activeTabId: signal('t1'),
     schema: null,
     schemaError: null,
     schemaFilter: '',
     expandedTables: new Set(),
     serverVersion: null,
-    running: false,
+    // Run state (signals): `running` flips the Run button + results pane via
+    // effects; `resultView` is the active Table/JSON/Chart tab. Via `.value`.
+    running: signal(false),
     abortController: null,
-    resultView: 'table',
+    resultView: signal('table'),
     // `forceExplain` is set by the Explain button to put an ordinary query into
     // EXPLAIN-view mode; a normal Run clears it (session-only). The active view is
     // derived per-run from the typed statement / clicked tab, not stored here.
     forceExplain: false,
     resultSort: { col: null, dir: 'asc' },
-    sidePanel: read.loadStr(KEYS.sidePanel, 'saved'),
+    sidePanel: signal(read.loadStr(KEYS.sidePanel, 'saved')),
     savedQueries: read.loadJSON(KEYS.saved, []),
     history: read.loadJSON(KEYS.history, []),
     // The saved-query collection treated as a named document ("the Library").
-    // `libraryName` is persisted; `libraryDirty` (unsaved changes since the last
-    // file Save/Replace/New) is session-only and resets on reload.
-    libraryName: read.loadStr(KEYS.libraryName, DEFAULT_LIBRARY_NAME),
-    libraryDirty: false,
+    // Signals: the header title (name + unsaved-changes dot) repaints via an
+    // effect that reads these. `libraryName` is persisted; `libraryDirty`
+    // (unsaved changes since the last file Save/Replace/New) is session-only and
+    // resets on reload. Read/write via `.value`.
+    libraryName: signal(read.loadStr(KEYS.libraryName, DEFAULT_LIBRARY_NAME)),
+    libraryDirty: signal(false),
     // Transient search text for the Library/History side panel (session-only,
     // cleared on a tab switch); never persisted.
     libraryFilter: '',
@@ -80,7 +89,7 @@ export function createState(read = { loadJSON, loadStr }) {
 
 /** The currently-active tab object (falls back to the first tab). */
 export function activeTab(state) {
-  return state.tabs.find((t) => t.id === state.activeTabId) || state.tabs[0];
+  return state.tabs.value.find((t) => t.id === state.activeTabId.value) || state.tabs.value[0];
 }
 
 /** Allocate a new tab id ('t2', 't3', ...). */
@@ -90,7 +99,7 @@ export function allocTabId(state) {
 
 const rnd = () => Math.random().toString(36).slice(2, 6);
 const makeId = (prefix, now) => prefix + now + rnd();
-const tabsForSaved = (state, id) => state.tabs.filter((t) => t.savedId === id);
+const tabsForSaved = (state, id) => state.tabs.value.filter((t) => t.savedId === id);
 
 /** The saved query a tab is linked to (via tab.savedId), or null. */
 export function savedForTab(state, tab) {
@@ -112,7 +121,7 @@ export function saveQuery(state, tab, name, description, save = saveJSON, now = 
   const chart = tabChart(tab);
   // Remember the current result view (Table/JSON/Chart) so a restore reopens the
   // same data representation; the transient raw view isn't persisted.
-  const view = SAVED_VIEWS.has(state.resultView) ? state.resultView : undefined;
+  const view = SAVED_VIEWS.has(state.resultView.value) ? state.resultView.value : undefined;
   let entry = savedForTab(state, tab);
   if (entry) {
     entry.name = nm;
@@ -129,7 +138,7 @@ export function saveQuery(state, tab, name, description, save = saveJSON, now = 
     tab.savedId = entry.id;
   }
   tab.name = nm;
-  state.libraryDirty = true;
+  state.libraryDirty.value = true;
   save(KEYS.saved, state.savedQueries);
   return entry;
 }
@@ -149,7 +158,7 @@ export function renameSaved(state, id, name, description, save = saveJSON) {
     if (desc) entry.description = desc; else delete entry.description;
   }
   for (const t of tabsForSaved(state, id)) t.name = nm;
-  state.libraryDirty = true;
+  state.libraryDirty.value = true;
   save(KEYS.saved, state.savedQueries);
 }
 
@@ -158,7 +167,7 @@ export function toggleFavorite(state, id, save = saveJSON) {
   const entry = state.savedQueries.find((q) => q.id === id);
   if (!entry) return;
   entry.favorite = !entry.favorite;
-  state.libraryDirty = true;
+  state.libraryDirty.value = true;
   save(KEYS.saved, state.savedQueries);
 }
 
@@ -197,7 +206,7 @@ export function filterHistory(list, query) {
 export function importSaved(state, queries, save = saveJSON, genId = () => makeId('s', Date.now())) {
   const { merged, added, updated, skipped } = mergeSaved(state.savedQueries, queries, genId);
   state.savedQueries = merged;
-  state.libraryDirty = true;
+  state.libraryDirty.value = true;
   save(KEYS.saved, state.savedQueries);
   return { added, updated, skipped };
 }
@@ -206,7 +215,7 @@ export function importSaved(state, queries, save = saveJSON, genId = () => makeI
 export function deleteSaved(state, id, save = saveJSON) {
   state.savedQueries = state.savedQueries.filter((q) => q.id !== id);
   for (const t of tabsForSaved(state, id)) t.savedId = null;
-  state.libraryDirty = true;
+  state.libraryDirty.value = true;
   save(KEYS.saved, state.savedQueries);
 }
 
@@ -219,14 +228,14 @@ export function deleteSaved(state, id, save = saveJSON) {
  *  kept tab doesn't show "Saved" against a query that's gone. */
 function pruneTabLinks(state) {
   const ids = new Set(state.savedQueries.map((q) => q.id));
-  for (const t of state.tabs) if (t.savedId && !ids.has(t.savedId)) t.savedId = null;
+  for (const t of state.tabs.value) if (t.savedId && !ids.has(t.savedId)) t.savedId = null;
 }
 
 /** Rename the library (blank → the default name). Marks dirty; persists name. */
 export function renameLibrary(state, name, saveName = saveStr) {
-  state.libraryName = String(name || '').trim() || DEFAULT_LIBRARY_NAME;
-  state.libraryDirty = true;
-  saveName(KEYS.libraryName, state.libraryName);
+  state.libraryName.value = String(name || '').trim() || DEFAULT_LIBRARY_NAME;
+  state.libraryDirty.value = true;
+  saveName(KEYS.libraryName, state.libraryName.value);
 }
 
 /** Start an empty, default-named library. Clears dirty; open tabs are kept
@@ -234,10 +243,10 @@ export function renameLibrary(state, name, saveName = saveStr) {
 export function newLibrary(state, save = saveJSON, saveName = saveStr) {
   state.savedQueries = [];
   pruneTabLinks(state);
-  state.libraryName = DEFAULT_LIBRARY_NAME;
-  state.libraryDirty = false;
+  state.libraryName.value = DEFAULT_LIBRARY_NAME;
+  state.libraryDirty.value = false;
   save(KEYS.saved, state.savedQueries);
-  saveName(KEYS.libraryName, state.libraryName);
+  saveName(KEYS.libraryName, state.libraryName.value);
 }
 
 /** Replace the library with `queries`, adopting the loaded file's base name.
@@ -261,10 +270,10 @@ export function replaceLibrary(state, queries, fileName, save = saveJSON, saveNa
   });
   pruneTabLinks(state);
   const base = String(fileName || '').replace(/\.[^.]+$/, '').trim();
-  state.libraryName = base || DEFAULT_LIBRARY_NAME;
-  state.libraryDirty = false;
+  state.libraryName.value = base || DEFAULT_LIBRARY_NAME;
+  state.libraryDirty.value = false;
   save(KEYS.saved, state.savedQueries);
-  saveName(KEYS.libraryName, state.libraryName);
+  saveName(KEYS.libraryName, state.libraryName.value);
 }
 
 /** Append `queries` into the library via the standard merge dedupe (sets dirty
@@ -275,7 +284,7 @@ export function appendLibrary(state, queries, save = saveJSON, genId = () => mak
 
 /** Mark the library as saved to a file (clears the unsaved-changes dot). */
 export function markLibrarySaved(state) {
-  state.libraryDirty = false;
+  state.libraryDirty.value = false;
 }
 
 /** Record a successful run in history (most-recent first, capped at 50). */

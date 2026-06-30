@@ -31,11 +31,11 @@ describe('createState', () => {
     expect(s.sidebarPx).toBe(248);
     expect(s.editorPct).toBe(45);
     expect(s.sideSplitPct).toBe(58);
-    expect(s.tabs).toHaveLength(1);
+    expect(s.tabs.value).toHaveLength(1);
     expect(s.savedQueries).toEqual([]);
     expect(s.expandedTables).toBeInstanceOf(Set);
-    expect(s.libraryName).toBe(DEFAULT_LIBRARY_NAME);
-    expect(s.libraryDirty).toBe(false);
+    expect(s.libraryName.value).toBe(DEFAULT_LIBRARY_NAME);
+    expect(s.libraryDirty.value).toBe(false);
   });
   it('reads + clamps persisted prefs', () => {
     const s = createState(reader({
@@ -49,18 +49,18 @@ describe('createState', () => {
       [KEYS.libraryName]: 'My team queries',
     }));
     expect(s.theme).toBe('light');
-    expect(s.libraryName).toBe('My team queries');
+    expect(s.libraryName.value).toBe('My team queries');
     expect(s.sidebarPx).toBe(420);
     expect(s.editorPct).toBe(15);
     expect(s.sideSplitPct).toBe(85);
-    expect(s.sidePanel).toBe('history');
+    expect(s.sidePanel.value).toBe('history');
     expect(s.savedQueries).toHaveLength(1);
     expect(s.history).toHaveLength(1);
   });
   it('defaults the reader to storage helpers', () => {
     vi.stubGlobal('localStorage', memStore({ [KEYS.theme]: 'light' }));
     const s = createState();
-    expect(s.tabs[0].id).toBe('t1');
+    expect(s.tabs.value[0].id).toBe('t1');
     expect(s.theme).toBe('light');
   });
 });
@@ -69,7 +69,7 @@ describe('activeTab / allocTabId', () => {
   it('returns the active tab, falling back to the first', () => {
     const s = createState(reader());
     expect(activeTab(s).id).toBe('t1');
-    s.activeTabId = 'gone';
+    s.activeTabId.value = 'gone';
     expect(activeTab(s).id).toBe('t1');
   });
   it('allocates incrementing ids', () => {
@@ -83,16 +83,16 @@ describe('saved queries', () => {
   it('saveQuery is a no-op for empty SQL or empty name', () => {
     const s = createState(reader());
     const save = vi.fn();
-    s.tabs[0].sql = '';
-    expect(saveQuery(s, s.tabs[0], 'name', '', save)).toBeNull();
-    s.tabs[0].sql = 'SELECT 1';
-    expect(saveQuery(s, s.tabs[0], '  ', '', save)).toBeNull();
+    s.tabs.value[0].sql = '';
+    expect(saveQuery(s, s.tabs.value[0], 'name', '', save)).toBeNull();
+    s.tabs.value[0].sql = 'SELECT 1';
+    expect(saveQuery(s, s.tabs.value[0], '  ', '', save)).toBeNull();
     expect(save).not.toHaveBeenCalled();
   });
   it('saveQuery creates + links the tab, then updates in place on re-save', () => {
     const s = createState(reader());
     const save = vi.fn();
-    const tab = s.tabs[0];
+    const tab = s.tabs.value[0];
     tab.sql = 'SELECT 1';
     const e1 = saveQuery(s, tab, 'My query', '', save, 100);
     expect(e1).toMatchObject({ name: 'My query', sql: 'SELECT 1', favorite: false });
@@ -111,7 +111,7 @@ describe('saved queries', () => {
   it('saveQuery stores/updates/clears an optional description', () => {
     const s = createState(reader());
     const save = vi.fn();
-    const tab = s.tabs[0];
+    const tab = s.tabs.value[0];
     tab.sql = 'SELECT 1';
     const e = saveQuery(s, tab, 'Q', '  what it does  ', save, 100); // trimmed
     expect(e.description).toBe('what it does');
@@ -120,27 +120,27 @@ describe('saved queries', () => {
     saveQuery(s, tab, 'Q', '   ', save, 300); // blank → dropped
     expect('description' in s.savedQueries[0]).toBe(false);
     // create with no description arg → no description field
-    const t2 = newTabObj('t2'); t2.sql = 'SELECT 2'; s.tabs.push(t2);
+    const t2 = newTabObj('t2'); t2.sql = 'SELECT 2'; s.tabs.value.push(t2);
     const e2 = saveQuery(s, t2, 'Q2', undefined, save, 400);
     expect('description' in e2).toBe(false);
   });
   it('savedForTab resolves the linked entry (or null)', () => {
     const s = createState(reader());
     s.savedQueries = [{ id: 's1', sql: 'x', name: 'n', favorite: false }];
-    s.tabs[0].savedId = 's1';
-    expect(savedForTab(s, s.tabs[0])).toMatchObject({ id: 's1' });
-    s.tabs[0].savedId = 'gone';
-    expect(savedForTab(s, s.tabs[0])).toBeNull();
+    s.tabs.value[0].savedId = 's1';
+    expect(savedForTab(s, s.tabs.value[0])).toMatchObject({ id: 's1' });
+    s.tabs.value[0].savedId = 'gone';
+    expect(savedForTab(s, s.tabs.value[0])).toBeNull();
     expect(savedForTab(s, { savedId: null })).toBeNull();
   });
   it('renameSaved updates the entry + any linked tab name', () => {
     const s = createState(reader());
     s.savedQueries = [{ id: 's1', sql: 'x', name: 'old', favorite: false }];
-    s.tabs[0].savedId = 's1';
+    s.tabs.value[0].savedId = 's1';
     const save = vi.fn();
     renameSaved(s, 's1', '  new  ', undefined, save);
     expect(s.savedQueries[0].name).toBe('new');
-    expect(s.tabs[0].name).toBe('new');
+    expect(s.tabs.value[0].name).toBe('new');
     renameSaved(s, 's1', '   ', undefined, save); // blank ignored
     expect(s.savedQueries[0].name).toBe('new');
     renameSaved(s, 'missing', 'x', undefined, save); // unknown id ignored
@@ -225,7 +225,7 @@ describe('saved queries', () => {
   it('saveQuery persists, updates, and clears the chart config alongside the SQL', () => {
     const s = createState(reader());
     const save = vi.fn();
-    const tab = s.tabs[0];
+    const tab = s.tabs.value[0];
     tab.sql = 'SELECT a, b';
     tab.chartCfg = { type: 'pie', x: 0, y: [1], series: null };
     tab.chartKey = 'a:String|b:UInt64';
@@ -244,28 +244,28 @@ describe('saved queries', () => {
   it('saveQuery persists the result view (Table/JSON/Chart), updates it, and ignores the transient raw view', () => {
     const s = createState(reader());
     const save = vi.fn();
-    const tab = s.tabs[0];
+    const tab = s.tabs.value[0];
     tab.sql = 'SELECT 1';
-    s.resultView = 'chart';
+    s.resultView.value = 'chart';
     const e = saveQuery(s, tab, 'V', '', save, 100);
     expect(e.view).toBe('chart');
     // re-save under a different view → updates
-    s.resultView = 'json';
+    s.resultView.value = 'json';
     saveQuery(s, tab, 'V', '', save, 200);
     expect(s.savedQueries[0].view).toBe('json');
     // raw view (TSV/JSON output) is not a saved view → dropped
-    s.resultView = 'raw';
+    s.resultView.value = 'raw';
     saveQuery(s, tab, 'V', '', save, 300);
     expect(s.savedQueries[0].view).toBeUndefined();
   });
   it('deleteSaved removes + clears tab pointers', () => {
     const s = createState(reader());
     s.savedQueries = [{ id: 's1', sql: 'x', name: 'n' }];
-    s.tabs[0].savedId = 's1';
+    s.tabs.value[0].savedId = 's1';
     const save = vi.fn();
     deleteSaved(s, 's1', save);
     expect(s.savedQueries).toHaveLength(0);
-    expect(s.tabs[0].savedId).toBeNull();
+    expect(s.tabs.value[0].savedId).toBeNull();
     expect(save).toHaveBeenCalledWith(KEYS.saved, []);
   });
 });
@@ -273,48 +273,48 @@ describe('saved queries', () => {
 describe('library document', () => {
   it('dirty flag: saved-query mutations set it; markLibrarySaved clears it', () => {
     const s = createState(reader());
-    const tab = s.tabs[0]; tab.sql = 'SELECT 1';
-    expect(s.libraryDirty).toBe(false);
+    const tab = s.tabs.value[0]; tab.sql = 'SELECT 1';
+    expect(s.libraryDirty.value).toBe(false);
     saveQuery(s, tab, 'Q', '', vi.fn());
-    expect(s.libraryDirty).toBe(true);
+    expect(s.libraryDirty.value).toBe(true);
     markLibrarySaved(s);
-    expect(s.libraryDirty).toBe(false);
+    expect(s.libraryDirty.value).toBe(false);
     toggleFavorite(s, tab.savedId, vi.fn());            // favorite the just-saved entry
-    expect(s.libraryDirty).toBe(true);
+    expect(s.libraryDirty.value).toBe(true);
     markLibrarySaved(s);
     renameSaved(s, tab.savedId, 'Q2', undefined, vi.fn());
-    expect(s.libraryDirty).toBe(true);
+    expect(s.libraryDirty.value).toBe(true);
     markLibrarySaved(s);
     deleteSaved(s, tab.savedId, vi.fn());
-    expect(s.libraryDirty).toBe(true);
+    expect(s.libraryDirty.value).toBe(true);
     markLibrarySaved(s);
     importSaved(s, [{ name: 'I', sql: 'i' }], vi.fn(), () => 'gi');
-    expect(s.libraryDirty).toBe(true);
+    expect(s.libraryDirty.value).toBe(true);
   });
 
   it('renameLibrary trims + persists + marks dirty; blank falls back to the default', () => {
     const s = createState(reader());
     const saveName = vi.fn();
     renameLibrary(s, '  My queries  ', saveName);
-    expect(s.libraryName).toBe('My queries');
-    expect(s.libraryDirty).toBe(true);
+    expect(s.libraryName.value).toBe('My queries');
+    expect(s.libraryDirty.value).toBe(true);
     expect(saveName).toHaveBeenCalledWith(KEYS.libraryName, 'My queries');
     renameLibrary(s, '   ', saveName);
-    expect(s.libraryName).toBe(DEFAULT_LIBRARY_NAME);
+    expect(s.libraryName.value).toBe(DEFAULT_LIBRARY_NAME);
   });
 
   it('newLibrary clears queries + name, clears dirty, prunes dangling tab links', () => {
     const s = createState(reader());
     s.savedQueries = [{ id: 's1', name: 'A', sql: '1', favorite: false }];
-    s.libraryName = 'Old'; s.libraryDirty = true;
-    s.tabs[0].savedId = 's1';                            // dangling after clear → pruned
-    s.tabs.push(newTabObj('t2'));                        // no savedId → skipped by prune
+    s.libraryName.value = 'Old'; s.libraryDirty.value = true;
+    s.tabs.value[0].savedId = 's1';                            // dangling after clear → pruned
+    s.tabs.value.push(newTabObj('t2'));                        // no savedId → skipped by prune
     const save = vi.fn(), saveName = vi.fn();
     newLibrary(s, save, saveName);
     expect(s.savedQueries).toEqual([]);
-    expect(s.libraryName).toBe(DEFAULT_LIBRARY_NAME);
-    expect(s.libraryDirty).toBe(false);
-    expect(s.tabs[0].savedId).toBeNull();
+    expect(s.libraryName.value).toBe(DEFAULT_LIBRARY_NAME);
+    expect(s.libraryDirty.value).toBe(false);
+    expect(s.tabs.value[0].savedId).toBeNull();
     expect(save).toHaveBeenCalledWith(KEYS.saved, []);
     expect(saveName).toHaveBeenCalledWith(KEYS.libraryName, DEFAULT_LIBRARY_NAME);
   });
@@ -322,8 +322,8 @@ describe('library document', () => {
   it('replaceLibrary keeps ids (mints for id-less), carries metadata, adopts the base name, clears dirty, prunes links', () => {
     const s = createState(reader());
     s.savedQueries = [{ id: 'old', name: 'X', sql: 'x', favorite: false }];
-    s.tabs[0].savedId = 'old';                           // becomes dangling → pruned
-    s.libraryDirty = true;
+    s.tabs.value[0].savedId = 'old';                           // becomes dangling → pruned
+    s.libraryDirty.value = true;
     const chart = { cfg: { type: 'bar' }, key: 'k' };
     const incoming = [
       { id: 'keep', name: 'A', sql: '1', favorite: true, description: 'd', chart, view: 'json' },
@@ -334,9 +334,9 @@ describe('library document', () => {
     replaceLibrary(s, incoming, 'My Library.json', save, saveName, () => 'g' + (++n));
     expect(s.savedQueries.map((q) => q.id)).toEqual(['keep', 'g1']);
     expect(s.savedQueries[0]).toMatchObject({ name: 'A', sql: '1', favorite: true, description: 'd', chart, view: 'json' });
-    expect(s.libraryName).toBe('My Library');            // extension stripped
-    expect(s.libraryDirty).toBe(false);
-    expect(s.tabs[0].savedId).toBeNull();
+    expect(s.libraryName.value).toBe('My Library');            // extension stripped
+    expect(s.libraryDirty.value).toBe(false);
+    expect(s.tabs.value[0].savedId).toBeNull();
     expect(save).toHaveBeenCalledWith(KEYS.saved, s.savedQueries);
     expect(saveName).toHaveBeenCalledWith(KEYS.libraryName, 'My Library');
   });
@@ -363,7 +363,7 @@ describe('library document', () => {
   it('replaceLibrary with no usable file name falls back to the default', () => {
     const s = createState(reader());
     replaceLibrary(s, [{ name: 'A', sql: '1' }], '.json', vi.fn(), vi.fn(), () => 'g');
-    expect(s.libraryName).toBe(DEFAULT_LIBRARY_NAME);
+    expect(s.libraryName.value).toBe(DEFAULT_LIBRARY_NAME);
   });
 
   it('appendLibrary merges via importSaved (dedupe), returns counts, sets dirty', () => {
@@ -375,14 +375,14 @@ describe('library document', () => {
     ], vi.fn(), () => 'gb');
     expect(r).toEqual({ added: 1, updated: 0, skipped: 1 });
     expect(s.savedQueries.map((q) => q.name)).toEqual(['A', 'B']);
-    expect(s.libraryDirty).toBe(true);
+    expect(s.libraryDirty.value).toBe(true);
   });
 
   it('library ops default their persistence seams (real storage helpers)', () => {
     vi.stubGlobal('localStorage', memStore());
     const s = createState(reader());
-    s.tabs[0].sql = 'SELECT 1';
-    const e = saveQuery(s, s.tabs[0], 'Q'); // default save/now/description
+    s.tabs.value[0].sql = 'SELECT 1';
+    const e = saveQuery(s, s.tabs.value[0], 'Q'); // default save/now/description
     renameLibrary(s, 'Lib');                // default saveName
     replaceLibrary(s, [{ id: e.id, name: 'Q', sql: 'SELECT 1' }], 'f.json'); // default seams
     newLibrary(s);                          // default seams
@@ -447,8 +447,8 @@ describe('default persistence', () => {
   it('saveQuery/renameSaved/toggleFavorite/deleteSaved/recordHistory/clearHistory persist via storage by default', () => {
     const s = createState(reader());
     // Exercises the default saveJSON path (writes to happy-dom localStorage).
-    s.tabs[0].sql = 'SELECT 9';
-    const e = saveQuery(s, s.tabs[0], 'nine');
+    s.tabs.value[0].sql = 'SELECT 9';
+    const e = saveQuery(s, s.tabs.value[0], 'nine');
     renameSaved(s, e.id, 'nine!');
     toggleFavorite(s, e.id);
     recordHistory(s, { sql: 'SELECT 9', result: { rawText: null, rows: [], progress: { elapsed_ns: 0 } } });

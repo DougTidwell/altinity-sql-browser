@@ -26,6 +26,7 @@ import * as oauth from '../net/oauth.js';
 import * as ch from '../net/ch-client.js';
 import { mountEditor, insertAtCursor, replaceEditor, SCHEMA_GRAPH_MIME } from './editor.js';
 import { renderTabs, selectTab, newTab, closeTab, loadIntoNewTab } from './tabs.js';
+import { effect, batch } from '@preact/signals-core';
 import { renderSchema } from './schema.js';
 import { renderResults } from './results.js';
 import { openSchemaView } from './explain-graph.js';
@@ -101,11 +102,10 @@ export function createApp(env = {}) {
   app.saveStr = saveStr;
   app.savePref = (name, value) => saveStr(KEYS[name], String(value));
   app.FileReader = env.FileReader || win.FileReader;
-  // Exposed seams for the header File menu (file-menu.js): the file-download
-  // helper (defined below) and a library-title refresh (dirty dot + name) run
-  // after a library mutation made outside file-menu.js (e.g. the save popover).
+  // Exposed seam for the header File menu (file-menu.js): the file-download
+  // helper (defined below). The library title (name + dirty dot) repaints via a
+  // libraryName/libraryDirty effect, so callers just mutate those signals.
   app.downloadFile = downloadFile;
-  app.updateLibraryTitle = () => renderLibraryTitle(app);
 
   // --- identity ----------------------------------------------------------
   // The host queries actually go to. chCtx.origin already resolves to the basic
@@ -398,7 +398,7 @@ export function createApp(env = {}) {
   app.tickElapsed = tickElapsed;
 
   async function run(opts) {
-    if (app.state.running) return; // already running — cancel via cancel()/Esc
+    if (app.state.running.value) return; // already running — cancel via cancel()/Esc
     const tab = app.activeTab();
     if (!tab.sql.trim()) return;
     await ensureConfig();
@@ -441,17 +441,21 @@ export function createApp(env = {}) {
     tab.result = newResult(fmt);
     if (explainView) tab.result.explainView = explainView;
     app.state.resultSort = { col: null, dir: 'asc' };
+    app.state.runT0 = t0;
+    app.state.runQueryId = cryptoObj.randomUUID ? cryptoObj.randomUUID() : 'q' + t0;
+    app.state.abortController = new AbortController();
+    app.state.runTick = setInterval(tickElapsed, 100);
     // Keep the current Table/JSON/Chart tab across re-runs (#34); a saved-query
     // open passes its remembered view in opts.view to restore that instead.
     const view = opts && opts.view;
-    app.state.resultView = ['table', 'json', 'chart'].includes(view) ? view : app.state.resultView;
-    app.state.running = true;
-    app.state.runT0 = t0;
-    app.state.runQueryId = cryptoObj.randomUUID ? cryptoObj.randomUUID() : 'q' + t0;
-    setRunBtn(true);
-    renderResults(app);
-    app.state.abortController = new AbortController();
-    app.state.runTick = setInterval(tickElapsed, 100);
+    // Flip the run signals last, in one batch: the results + Run-button effects
+    // fire on this write and read runT0/elapsed, so the bookkeeping above must
+    // already be set. (The old explicit setRunBtn(true)/renderResults are now
+    // those effects' job.)
+    batch(() => {
+      app.state.resultView.value = ['table', 'json', 'chart'].includes(view) ? view : app.state.resultView.value;
+      app.state.running.value = true;
+    });
 
     try {
       const out = await ch.runQuery(chCtx, runSql, {
@@ -474,19 +478,20 @@ export function createApp(env = {}) {
     } finally {
       clearInterval(app.state.runTick);
       app.state.runTick = null;
-      app.state.running = false;
       app.state.abortController = null;
       app.state.runQueryId = null;
       app.state.runT0 = null;
       tab.result.progress.elapsed_ns = (now() - t0) * 1e6;
-      setRunBtn(false);
-      renderResults(app);
+      // Flip running off last: the results + Run-button effects fire here and
+      // render the final stats, so elapsed_ns must already be recorded. (Old
+      // explicit setRunBtn(false)/renderResults are now those effects' job.)
+      app.state.running.value = false;
       if (!tab.result.error && !tab.result.cancelled) app.recordHistory(tab);
     }
   }
   // Stop an in-flight query: abort the stream and KILL QUERY on the server.
   function cancel() {
-    if (!app.state.running) return;
+    if (!app.state.running.value) return;
     if (app.state.abortController) app.state.abortController.abort();
     ch.killQuery(chCtx, app.state.runQueryId, sqlString);
   }
@@ -524,8 +529,8 @@ export function createApp(env = {}) {
       tab.result = newResult('Table');
       tab.result.error = msg;
       tab.result.formatError = true; // a format error, not a run result (so success can clear just this)
-      app.state.resultView = 'table';
-      renderResults(app);
+      app.state.resultView.value = 'table';
+      renderResults(app); // explicit: the format-error tab.result is an in-place write, and resultView may already be 'table' (no effect)
       const pos = parseErrorPos(msg);
       if (pos != null) app.dom.editorRevealCaret(pos);
     }
@@ -639,7 +644,7 @@ export function createApp(env = {}) {
   // --- saved / history bridges ------------------------------------------
   app.recordHistory = (tab) => {
     recordHistory(app.state, tab, saveJSON);
-    if (app.state.sidePanel === 'history') renderSavedHistory(app);
+    if (app.state.sidePanel.value === 'history') renderSavedHistory(app);
   };
 
   // --- share + star ------------------------------------------------------
@@ -765,8 +770,7 @@ export function createApp(env = {}) {
       app.updateSaveBtn();
       app.actions.rerenderTabs();
       renderSavedHistory(app);
-      app.updateLibraryTitle();
-      flashToast('Saved', { document: doc });
+      flashToast('Saved', { document: doc }); // saveQuery dirtied the library → title effect adds the dot
     };
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
     // In the multiline description, plain Enter inserts a newline; ⌘/Ctrl+Enter commits.
@@ -938,11 +942,44 @@ export function renderApp(app, helpers) {
   app.root.replaceChildren(header, app.dom.banner, h('div', { class: 'main-row' }, sidebar, sideHandle, workbench));
 
   mountEditor(app, app.dom.editorRegion);
-  renderTabs(app);
-  renderResults(app);
+  // Reactive repaint of the tab-dependent surface — replaces the old tabs.js
+  // refresh(): re-runs whenever the tab list or active tab changes, so tab ops
+  // just mutate the signals.
+  effect(() => {
+    app.state.tabs.value;
+    app.state.activeTabId.value;
+    renderTabs(app);
+    if (app.dom.editorSync) app.dom.editorSync();
+    app.updateSaveBtn();
+  });
+  // Reactive repaint of the results pane: re-runs on a tab switch, a Table/JSON/
+  // Chart view change, or a run-state flip. (renderResults' activeTab() also
+  // reads tabs.value, so a tab-list change repaints here too.) Streaming-data
+  // repaints still call renderResults directly from run()'s onChunk.
+  effect(() => {
+    app.state.activeTabId.value;
+    app.state.resultView.value;
+    app.state.running.value;
+    renderResults(app);
+  });
+  // The Run button reflects the run state (label + disabled).
+  effect(() => app.setRunBtn(app.state.running.value));
   renderSchema(app);
-  renderSavedHistory(app);
-  app.updateSaveBtn();
+  // Reactive repaint of the side panel: re-runs when the active panel changes
+  // (Library ↔ History). Data-driven repaints (savedQueries/history mutations)
+  // still call renderSavedHistory directly until those slices are signals too.
+  effect(() => {
+    app.state.sidePanel.value;
+    renderSavedHistory(app);
+  });
+  // Reactive repaint of the header library title (name + unsaved-changes dot):
+  // re-runs when the name or dirty flag changes. The edit-mode toggle is driven
+  // separately (editingLibrary is not a signal — file-menu.js renders it directly).
+  effect(() => {
+    app.state.libraryName.value;
+    app.state.libraryDirty.value;
+    renderLibraryTitle(app);
+  });
   app.loadVersion();
   app.loadSchema();
   app.loadReference();

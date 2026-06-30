@@ -291,17 +291,30 @@ describe('query run', () => {
     const routes = [[(u, sql) => /SELECT 1/.test(sql), resp({ body: streamBody(['{"meta":[{"name":"a","type":"UInt8"}]}\n', '{"row":{"a":"1"}}\n']) })]];
     const { app } = appForRun(routes, { Chart: class { destroy() {} } }); // Chart seam so the chart view renders
     app.activeTab().sql = 'SELECT 1';
-    app.state.resultView = 'chart';
+    app.state.resultView.value = 'chart';
     await app.actions.run();                  // no opts → keep the current (chart) tab
-    expect(app.state.resultView).toBe('chart');
+    expect(app.state.resultView.value).toBe('chart');
     await app.actions.run({ view: 'json' });  // saved-query open restores its view
-    expect(app.state.resultView).toBe('json');
+    expect(app.state.resultView.value).toBe('json');
     await app.actions.run({ view: 'table' });
-    expect(app.state.resultView).toBe('table');
+    expect(app.state.resultView.value).toBe('table');
     await app.actions.run({ view: 'chart' });
-    expect(app.state.resultView).toBe('chart');
+    expect(app.state.resultView.value).toBe('chart');
     await app.actions.run({ view: 'bogus' }); // unknown view → keep current (chart)
-    expect(app.state.resultView).toBe('chart');
+    expect(app.state.resultView.value).toBe('chart');
+  });
+  it('switching the result view repaints via the effect (the view-tab onclick only sets the signal)', async () => {
+    const routes = [[(u, sql) => /SELECT 1/.test(sql), resp({ body: streamBody(['{"meta":[{"name":"a","type":"UInt8"}]}\n', '{"row":{"a":"1"}}\n']) })]];
+    const { app } = appForRun(routes);
+    app.activeTab().sql = 'SELECT 1';
+    await app.actions.run();
+    const region = app.dom.resultsRegion;
+    expect(region.querySelector('.res-table')).not.toBeNull(); // table view by default
+    const jsonTab = [...region.querySelectorAll('.result-view-tab')].find((b) => b.textContent.includes('JSON'));
+    jsonTab.dispatchEvent(new Event('click', { bubbles: true }));
+    expect(app.state.resultView.value).toBe('json');
+    expect(region.querySelector('.json-view')).not.toBeNull(); // repainted by the results effect, not the onclick
+    expect(region.querySelector('.res-table')).toBeNull();
   });
   it('no-ops on empty SQL', async () => {
     const { app } = appForRun([]);
@@ -311,12 +324,12 @@ describe('query run', () => {
   });
   it('run() while already running is a no-op (cancel is separate)', async () => {
     const { app } = appForRun([]);
-    app.state.running = true;
+    app.state.running.value = true;
     const ac = { abort: vi.fn() };
     app.state.abortController = ac;
     await app.actions.run();
     expect(ac.abort).not.toHaveBeenCalled(); // re-running no longer aborts
-    expect(app.state.running).toBe(true);
+    expect(app.state.running.value).toBe(true);
   });
   it('setRunBtn: "Running…" with no trailing "null"; "Run" + kbd when idle', () => {
     const { app } = appForRun([]);
@@ -341,7 +354,7 @@ describe('query run', () => {
     const { app, e } = appForRun([]);
     app.actions.cancel(); // idle → no-op, no throw
     const abort = vi.fn();
-    app.state.running = true;
+    app.state.running.value = true;
     app.state.abortController = { abort, signal: {} };
     app.state.runQueryId = 'qid-1';
     app.actions.cancel();
@@ -874,7 +887,7 @@ describe('exhaustive controller coverage', () => {
     document.querySelector('.save-popover .sp-input').value = 'Q';
     document.querySelector('.save-popover .sp-save').dispatchEvent(new Event('click')); // commit
     app.dom.shareBtn.dispatchEvent(new Event('click')); // share
-    expect(app.state.tabs.length).toBeGreaterThan(1);
+    expect(app.state.tabs.value.length).toBeGreaterThan(1);
     expect(app.state.savedQueries.length).toBe(1);
   });
 
@@ -986,7 +999,7 @@ describe('exhaustive controller coverage', () => {
     app.renderApp();
     app.dom.runBtn.dispatchEvent(new Event('click')); // run wrapper (empty sql → no-op)
     app.actions.newTab();
-    app.state.tabs.push({ id: 'tx', name: 'X', sql: '', dirty: false, result: null, savedId: null });
+    app.state.tabs.value.push({ id: 'tx', name: 'X', sql: '', dirty: false, result: null, savedId: null });
     app.actions.selectTab('tx');
     app.actions.insertAtCursor('zz');
     app.actions.replaceEditor('SELECT 9');
@@ -994,8 +1007,8 @@ describe('exhaustive controller coverage', () => {
     app.actions.rerenderTabs();
     app.actions.rerenderResults();
     app.actions.updateSaveBtn();
-    app.actions.closeTab(app.state.activeTabId);
-    expect(app.state.tabs.length).toBeGreaterThan(0);
+    app.actions.closeTab(app.state.activeTabId.value);
+    expect(app.state.tabs.value.length).toBeGreaterThan(0);
   });
 
   it('share / toggleSaved tolerate empty SQL; share with no navigator at all', () => {
@@ -1197,7 +1210,7 @@ describe('exhaustive controller coverage', () => {
     });
     const app = createApp(e);
     app.renderApp();
-    app.state.sidePanel = 'history';
+    app.state.sidePanel.value = 'history';
     app.activeTab().sql = 'SELECT 1';
     await app.actions.run();
     expect(app.state.history.length).toBe(1);
