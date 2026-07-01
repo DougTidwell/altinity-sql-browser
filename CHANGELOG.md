@@ -157,6 +157,12 @@ auto-generated per-PR notes; this file is the curated, human-readable history.
   addendum); the schema slice is the documented imperative exception, converted
   with a *replaced* Set-valued `expanded` signal and reference-replaced column
   loads rather than in-place mutation. This **completes the migration**. (#88, #91)
+- **Chart-type-aware row cap** (#109): the flat 500-row chart cap is now a
+  per-type lookup (`chartRowCap(type)` / `CHART_ROW_CAPS` in
+  `src/core/chart-data.js`) — Pie 30, Bar (horizontal) 500, Column 1000, Line/
+  Area 5000 — matching each chart shape's actual readability ceiling instead
+  of one eyeballed number. Switching chart type re-slices to the new cap and
+  updates the truncation note in lockstep.
 
 ### Fixed
 - A newly created, still-empty database (e.g. `CREATE DATABASE`) never appeared
@@ -213,6 +219,17 @@ auto-generated per-PR notes; this file is the curated, human-readable history.
   .move()` (Chrome 110+) so a cancelled/failed export leaves a clearly-labeled,
   inspectable partial artifact. Falls back to leaving the plain (non-renamed)
   file on browsers without `.move()` support, or if the rename itself fails (#105).
+- `createApp` built the `app` object with a `doc` field, but every other module
+  (`explain-graph.js`, `results.js`, `schema-detail.js`, `file-menu.js`,
+  `shortcuts.js`, `app.js` itself) read `app.document` instead — never
+  assigned, so `app.document || document` silently always fell back to the
+  global `document`, harmless today only because the two happened to coincide
+  in both production and tests. `app` now exposes `document` (not `doc`), and
+  the fallbacks that were provably unreachable (verified per call site against
+  `makeApp()` / real callers) were dropped; the fallbacks that are
+  deliberately null/minimal-`app`-tolerant (`detached-view.js`,
+  `explain-graph.js`, `schema-detail.js`, and `shortcuts.js` — which has a
+  dedicated `delete app.document` test) were left untouched. (#106)
 - Every backdrop/panel modal (the cell-detail drawer, the rows-viewer pane, the
   graph overlay, the file-menu confirm dialog, the keyboard-shortcuts modal)
   closed on **any** `click` reaching its backdrop, without checking where the
