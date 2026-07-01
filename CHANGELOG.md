@@ -102,6 +102,9 @@ auto-generated per-PR notes; this file is the curated, human-readable history.
   through APIs bound to the window its own module runs in, always the main
   window; `renderChart` now forces an explicit resize + `'resize'`-mode
   update off the canvas's own (realm-agnostic) geometry once it's attached.
+  Also mirrors the app's favicon into every detached tab (a `faviconHref`
+  seam, same pattern as the existing `stylesText` one) — `about:blank` ships
+  neither, so a real tab previously showed the browser's generic icon.
 
 ### Changed
 - State reactivity now uses `@preact/signals-core` (the third bundled runtime
