@@ -1637,7 +1637,7 @@ export function renderApp(app, helpers) {
   // the pane visibility — no JS effect needed for the active state).
   app.dom.mobileSegmented = h('div', { class: 'mobile-segmented' },
     h('button', { class: 'mseg-btn', 'data-seg': 'schema', onclick: () => { state.mobileTab.value = 'schema'; } }, Icon.database(), h('span', null, 'Schema')),
-    h('button', { class: 'mseg-btn', 'data-seg': 'library', onclick: () => { state.mobileTab.value = 'library'; } }, Icon.layers(), h('span', null, 'Library')));
+    h('button', { class: 'mseg-btn', 'data-seg': 'library', onclick: () => { state.mobileTab.value = 'library'; } }, Icon.layers(), h('span', null, 'Queries')));
   sidebar.append(app.dom.mobileSegmented, schemaPane, app.dom.sideSplit, savedPane);
   const sideHandle = h('div', { class: 'col-resize', onmousedown: (e) => helpers.startDrag(e, 'col', dragCtx) });
 
