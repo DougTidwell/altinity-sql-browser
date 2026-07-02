@@ -1652,18 +1652,18 @@ table.res-table tbody tr:hover td.idx { background: var(--bg-hover); }
 
    The app is desktop-first. Below MOBILE_BREAKPOINT_PX (768 — keep in sync with
    src/state.js, which drives the JS `isMobile` matchMedia listener), the shell
-   drops every pointer-only affordance rather than leave a control that silently
-   no-ops on a finger: resize handles vanish, the sidebar becomes a tap overlay,
-   the editor/results stack, and the pan/zoom-only graph fullscreen is hidden.
-   The core SQL loop (schema tap-to-browse, write, run, read, chart, 4 of 5
-   EXPLAIN views) stays fully usable. See the issue for the per-feature triage.
+   becomes a bottom-tab-nav workbench: one full-screen panel at a time (Tables /
+   Editor / Results) chosen from a bottom bar, instead of squeezing the desktop
+   sidebar + split panes onto a phone. Pointer-only affordances (resize handles,
+   drag sources, pan/zoom graph fullscreen) are still hidden; the core SQL loop
+   (tap-browse schema, write, run, read, chart, 4 of 5 EXPLAIN views) is intact.
 
-   Base state for the two mobile-only chrome elements — hidden on desktop; the
-   @media block below reveals them. (Declared before the block so the block, at
-   equal specificity + later in source, wins when the media query matches.)
+   Base state for the mobile-only chrome — hidden on desktop; the @media block
+   below reveals it. (Declared before the block so the block, at equal
+   specificity + later in source, wins when the media query matches.)
    ========================================================================== */
-.sidebar-toggle { display: none; }
-.sidebar-backdrop { display: none; }
+.mobile-nav { display: none; }
+.mobile-segmented { display: none; }
 
 /* Header declutter — a wider *cosmetic* breakpoint than the stacked mobile
    layout below (#126). The full header (logo wordmark, host chip, divider,
@@ -1687,33 +1687,87 @@ table.res-table tbody tr:hover td.idx { background: var(--bg-hover); }
      still overflowed. */
   .app-header { gap: 8px; padding: 0 8px; }
 
-  /* Sidebar → slide-in overlay toggled by the header .sidebar-toggle button.
-     Anchored to .main-row (position:absolute), so it sits right below the header
-     whatever its height; `width` is set inline (sidebarPx) so override with
-     !important. Off-screen at rest, clipped by .main-row's overflow:hidden. */
-  .sidebar {
-    position: absolute; left: 0; top: 0; bottom: 0;
-    width: min(85vw, 320px) !important;
-    z-index: 40;
-    transform: translateX(-100%);
-    transition: transform .18s ease;
-    box-shadow: 2px 0 18px rgba(0, 0, 0, .4);
+  /* ---- Bottom tab nav: one full-screen panel at a time ---- */
+  .mobile-nav {
+    display: flex; flex-shrink: 0; height: 56px;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--bg-header); border-top: 1px solid var(--border);
   }
-  .main-row.sidebar-open .sidebar { transform: translateX(0); }
-  .main-row.sidebar-open .sidebar-backdrop {
-    display: block; position: absolute; inset: 0; z-index: 39;
-    background: rgba(0, 0, 0, .45);
+  .mobile-nav-btn {
+    flex: 1; border: none; background: transparent; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    color: var(--fg-faint); font-family: inherit; position: relative;
+    -webkit-tap-highlight-color: transparent;
   }
-  .sidebar-toggle { display: inline-flex; }
+  .mnav-ic { display: flex; position: relative; }
+  .mnav-label { font-size: 10.5px; font-weight: 500; letter-spacing: .01em; }
+  /* Active tab: accent-tinted with a top bar (mirrors the desktop tab accent). */
+  .main-row[data-mobile-view="tables"] ~ .mobile-nav .mobile-nav-btn[data-view="tables"],
+  .main-row[data-mobile-view="editor"] ~ .mobile-nav .mobile-nav-btn[data-view="editor"],
+  .main-row[data-mobile-view="results"] ~ .mobile-nav .mobile-nav-btn[data-view="results"] {
+    color: var(--accent);
+  }
+  .main-row[data-mobile-view="tables"] ~ .mobile-nav .mobile-nav-btn[data-view="tables"] .mnav-label,
+  .main-row[data-mobile-view="editor"] ~ .mobile-nav .mobile-nav-btn[data-view="editor"] .mnav-label,
+  .main-row[data-mobile-view="results"] ~ .mobile-nav .mobile-nav-btn[data-view="results"] .mnav-label { font-weight: 600; }
+  .main-row[data-mobile-view="tables"] ~ .mobile-nav .mobile-nav-btn[data-view="tables"]::before,
+  .main-row[data-mobile-view="editor"] ~ .mobile-nav .mobile-nav-btn[data-view="editor"]::before,
+  .main-row[data-mobile-view="results"] ~ .mobile-nav .mobile-nav-btn[data-view="results"]::before {
+    content: ''; position: absolute; top: 0; left: 30%; right: 30%; height: 2px;
+    background: var(--accent); border-radius: 2px;
+  }
+  /* Results row-count / ● badge, top-right of the icon. Empty → hidden. */
+  .mnav-badge {
+    position: absolute; top: -6px; left: 100%; margin-left: -8px;
+    min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 9px; font-weight: 700;
+    font-family: var(--mono); display: flex; align-items: center; justify-content: center;
+  }
+  .mnav-badge:empty { display: none; }
+
+  /* ---- Full-screen view switching (main-row[data-mobile-view]) ---- */
+  /* Tables → sidebar fills; workbench hidden. Sidebar is a normal flow child
+     here (not the desktop resizable column), full width. */
+  .main-row[data-mobile-view="tables"] .workbench { display: none; }
+  .main-row[data-mobile-view="tables"] .sidebar { display: flex; width: 100% !important; }
+  /* Editor / Results → sidebar hidden, workbench fills. */
+  .main-row[data-mobile-view="editor"] .sidebar,
+  .main-row[data-mobile-view="results"] .sidebar { display: none; }
+  /* Editor view: query tabs + toolbar + editor; hide the results half. */
+  .main-row[data-mobile-view="editor"] .results-region,
+  .main-row[data-mobile-view="editor"] .editor-results-split { display: none; }
+  .main-row[data-mobile-view="editor"] .editor-region { height: auto !important; flex: 1; }
+  /* Results view: just the results pane (its own toolbar lives inside it). */
+  .main-row[data-mobile-view="results"] .qtabs,
+  .main-row[data-mobile-view="results"] .ed-toolbar,
+  .main-row[data-mobile-view="results"] .editor-region,
+  .main-row[data-mobile-view="results"] .editor-results-split { display: none; }
+
+  /* ---- Tables view: Schema | Library segmented, one pane at a time ---- */
+  .mobile-segmented {
+    display: flex; gap: 3px; padding: 3px; margin: 8px 10px; flex-shrink: 0;
+    background: var(--bg-chip); border-radius: 8px;
+  }
+  .mseg-btn {
+    flex: 1; height: 32px; border: none; border-radius: 6px; cursor: pointer;
+    background: transparent; color: var(--fg-mute); font-weight: 500; font-size: 12.5px;
+    font-family: inherit; display: flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  .sidebar[data-mobile-tab="schema"] .mseg-btn[data-seg="schema"],
+  .sidebar[data-mobile-tab="library"] .mseg-btn[data-seg="library"] {
+    background: var(--bg-header); color: var(--fg); font-weight: 600;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
+  }
+  /* Show only the selected pane full-height (override the desktop split %). */
+  .sidebar[data-mobile-tab="schema"] .saved-pane,
+  .sidebar[data-mobile-tab="library"] .schema-pane { display: none; }
+  .sidebar[data-mobile-tab="schema"] .schema-pane { height: auto !important; flex: 1; }
+  .sidebar[data-mobile-tab="library"] .saved-pane { flex: 1; }
 
   /* No draggable splitters on touch — a hidden handle can't receive mousedown,
      so the splitter JS never wires up (nothing to disable in JS). */
   .col-resize, .row-resize, .side-split,
   .col-resize-h, .schema-detail-handle, .cd-resize-h { display: none !important; }
-
-  /* Editor + results stack with a fixed split (the drag handle is gone). The
-     editor height is set inline (editorPct pref) so override with !important. */
-  .editor-region { height: 42% !important; }
 
   /* Drag cue off (the schema rows drop `draggable` in mobile mode — schema.js). */
   .tree-row:active { cursor: default; }

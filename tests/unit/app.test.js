@@ -2768,41 +2768,76 @@ describe('mobile best-effort mode (#126)', () => {
       emit(next) { this.matches = next; for (const fn of listeners) fn({ matches: next }); },
     };
   }
-  function mobileApp(matches = true) {
+  function mobileApp(matches = true, routes = []) {
     const mql = fakeMQL(matches);
-    const app = createApp(env({ matchMedia: () => mql, fetch: makeFetch([]) }));
+    const app = createApp(env({ matchMedia: () => mql, fetch: makeFetch(routes) }));
     app.renderApp();
     return { app, mql };
   }
+  const nav = (app, view) => app.root.querySelector('.mobile-nav-btn[data-view="' + view + '"]');
 
-  it('seeds isMobile from matchMedia and mounts the sidebar toggle + backdrop', () => {
+  it('seeds isMobile and mounts the bottom nav + Tables segmented, defaulting to the Editor view', () => {
     const { app } = mobileApp(true);
     expect(app.state.isMobile.value).toBe(true);
-    expect(app.root.querySelector('.sidebar-toggle')).not.toBeNull();
-    expect(app.root.querySelector('.sidebar-backdrop')).not.toBeNull();
+    expect(app.root.querySelectorAll('.mobile-nav-btn')).toHaveLength(3);
+    expect(app.root.querySelector('.mobile-segmented')).not.toBeNull();
+    expect(app.root.querySelector('.main-row').dataset.mobileView).toBe('editor');
+    expect(app.root.querySelector('.sidebar').dataset.mobileTab).toBe('schema');
   });
 
-  it('a breakpoint change flips isMobile and collapses the sidebar overlay when leaving mobile', () => {
+  it('a breakpoint change flips isMobile', () => {
     const { app, mql } = mobileApp(true);
-    app.state.sidebarOpen.value = true;
-    mql.emit(false); // → desktop width
+    mql.emit(false);
     expect(app.state.isMobile.value).toBe(false);
-    expect(app.state.sidebarOpen.value).toBe(false); // stale overlay collapsed
-    mql.emit(true); // back to mobile — the open state is left as-is (still false)
+    mql.emit(true);
     expect(app.state.isMobile.value).toBe(true);
-    expect(app.state.sidebarOpen.value).toBe(false);
   });
 
-  it('the header toggle opens the sidebar overlay; the backdrop closes it', () => {
+  it('bottom-nav buttons switch the full-screen view (data-mobile-view)', () => {
     const { app } = mobileApp(true);
     const mainRow = app.root.querySelector('.main-row');
-    expect(mainRow.classList.contains('sidebar-open')).toBe(false);
-    app.root.querySelector('.sidebar-toggle').dispatchEvent(new Event('click', { bubbles: true }));
-    expect(app.state.sidebarOpen.value).toBe(true);
-    expect(mainRow.classList.contains('sidebar-open')).toBe(true);
-    app.root.querySelector('.sidebar-backdrop').dispatchEvent(new Event('click', { bubbles: true }));
-    expect(app.state.sidebarOpen.value).toBe(false);
-    expect(mainRow.classList.contains('sidebar-open')).toBe(false);
+    nav(app, 'tables').dispatchEvent(new Event('click', { bubbles: true }));
+    expect(app.state.mobileView.value).toBe('tables');
+    expect(mainRow.dataset.mobileView).toBe('tables');
+    nav(app, 'results').dispatchEvent(new Event('click', { bubbles: true }));
+    expect(mainRow.dataset.mobileView).toBe('results');
+  });
+
+  it('the Schema | Library segmented switches the sidebar pane (data-mobile-tab)', () => {
+    const { app } = mobileApp(true);
+    const sidebar = app.root.querySelector('.sidebar');
+    app.root.querySelector('.mseg-btn[data-seg="library"]').dispatchEvent(new Event('click', { bubbles: true }));
+    expect(app.state.mobileTab.value).toBe('library');
+    expect(sidebar.dataset.mobileTab).toBe('library');
+    app.root.querySelector('.mseg-btn[data-seg="schema"]').dispatchEvent(new Event('click', { bubbles: true }));
+    expect(sidebar.dataset.mobileTab).toBe('schema');
+  });
+
+  it('auto-navigates: inserting into the editor → Editor, running → Results', async () => {
+    const routes = [[(u, sql) => /SELECT 1/.test(sql), resp({ body: streamBody(['{"meta":[{"name":"a","type":"UInt8"}]}\n', '{"row":{"a":"1"}}\n']) })]];
+    const { app } = mobileApp(true, routes);
+    app.state.mobileView.value = 'tables';
+    app.actions.insertAtCursor('foo');
+    expect(app.state.mobileView.value).toBe('editor'); // insert jumped to Editor
+    app.activeTab().sql = 'SELECT 1';
+    await app.actions.run();
+    expect(app.state.mobileView.value).toBe('results'); // run jumped to Results
+  });
+
+  it('loading a saved query into a tab jumps to the Editor view', () => {
+    const { app } = mobileApp(true);
+    app.state.mobileView.value = 'tables';
+    app.actions.loadIntoNewTab('q', 'SELECT 2', null, null);
+    expect(app.state.mobileView.value).toBe('editor');
+  });
+
+  it('the Results nav badge shows ● while running and the row count when idle', () => {
+    const { app } = mobileApp(true);
+    app.activeTab().result = { rawText: null, rows: [['1']], columns: [{ name: 'a', type: 'UInt8' }], progress: { rows: 15, bytes: 0, elapsed_ns: 0 } };
+    app.state.running.value = true;
+    expect(app.dom.mobileBadge.textContent).toBe('●');
+    app.state.running.value = false;
+    expect(app.dom.mobileBadge.textContent).toBe('15');
   });
 
   it('anchored popovers center horizontally on mobile instead of anchoring off-screen', () => {

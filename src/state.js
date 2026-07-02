@@ -155,12 +155,15 @@ export function createState(read = { loadJSON, loadStr }) {
     // Best-effort mobile mode (#126). `isMobile` mirrors the viewport width
     // against MOBILE_BREAKPOINT_PX — set once and on `change` by app.js's
     // injected matchMedia listener. Read by the schema tree (to drop
-    // touch-useless drag/hover affordances) and the results drop target; the
-    // rest of the mobile layout is pure CSS. `sidebarOpen` toggles the mobile
-    // sidebar overlay (a no-op above the breakpoint, where the sidebar is an
-    // inline column). Both session-only, never persisted. Via `.value`.
+    // touch-useless drag/hover affordances) and the results drop target.
+    // `mobileView` is the bottom-tab-nav's active full-screen panel and
+    // `mobileTab` the Tables view's Schema|Library segmented choice (a separate
+    // axis from `sidePanel`, which still drives the saved-pane's own
+    // Library/History sub-tabs). All session-only, never persisted; a no-op
+    // above the breakpoint (the CSS only reads them there). Via `.value`.
     isMobile: signal(false),
-    sidebarOpen: signal(false),
+    mobileView: signal('editor'),
+    mobileTab: signal('schema'),
   };
 }
 
