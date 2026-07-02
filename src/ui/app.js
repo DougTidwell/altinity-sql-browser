@@ -1437,7 +1437,16 @@ export function createApp(env = {}) {
     const a = fixedAnchor(r, zoomScale(anchorEl), { viewportW: win.innerWidth || 0 });
     node.style.position = 'fixed';
     node.style.top = a.top + 'px';
-    node.style.right = a.right + 'px';
+    if (app.state.isMobile.value) {
+      // Mobile (#126): the trigger can sit mid-toolbar (the toolbar scrolls), so
+      // right-aligning to it pushes a fixed-width popover off the narrow
+      // viewport's left edge. Center it horizontally instead (still dropped below
+      // the trigger via `top`); the mobile max-width clamps keep it in-bounds.
+      node.style.left = '50%';
+      node.style.transform = 'translateX(-50%)';
+    } else {
+      node.style.right = a.right + 'px';
+    }
     doc.body.appendChild(node);
     doc.addEventListener('keydown', onKey, true);
     doc.addEventListener('mousedown', onOutside, true);

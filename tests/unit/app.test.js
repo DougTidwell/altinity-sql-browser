@@ -2805,6 +2805,17 @@ describe('mobile best-effort mode (#126)', () => {
     expect(mainRow.classList.contains('sidebar-open')).toBe(false);
   });
 
+  it('anchored popovers center horizontally on mobile instead of anchoring off-screen', () => {
+    const { app } = mobileApp(true);
+    app.activeTab().sql = 'SELECT 1'; // openSavePopover no-ops on empty SQL
+    app.actions.save();
+    const pop = document.querySelector('.save-popover');
+    expect(pop).not.toBeNull();
+    expect(pop.style.left).toBe('50%');
+    expect(pop.style.transform).toBe('translateX(-50%)');
+    expect(pop.style.right).toBe(''); // not right-anchored to the (scrolled) button
+  });
+
   it('the results-pane schema-graph drop target is inert on mobile (drop + dragover no-op)', () => {
     const { app } = mobileApp(true);
     app.actions.showSchemaGraph = vi.fn();
