@@ -81,6 +81,36 @@ Touch these in one change:
 Pure-by-construction modules, injected side-effect seams, per-file coverage
 thresholds, and a single ClickHouse-served artifact built by esbuild.
 
+### Trademark symbols
+
+Both "Altinity" and "ClickHouse" are registered trademarks and must carry the
+® symbol on first use in every file. Apply this rule once per file, not once
+per project.
+
+- **Plain text and Markdown files** (`.md`, `.txt`, source comments, etc.):
+  append ® directly to the word — `Altinity®`, `ClickHouse®` — on its first
+  occurrence. Subsequent occurrences in the same file are unadorned.
+- **HTML files**: the `<title>` element and the `<body>` are treated as two
+  independent contexts. If either trademark appears in `<title>`, mark it
+  there. The first occurrence in `<body>` also gets ®, even if the word
+  already appeared in `<title>`. Use the literal character `®` or the entity
+  `&reg;` — both are acceptable in HTML.
+
+  Example:
+  ```html
+  <title>ClickHouse® OAuth Demo</title>
+  ...
+  <body>
+    <h1>ClickHouse® SQL Browser</h1>   <!-- first body occurrence → ® -->
+    <p>Query your ClickHouse cluster.</p> <!-- subsequent → no ® -->
+  </body>
+  ```
+- **JavaScript/TypeScript source**: treat string literals and comments
+  separately from each other; a ® in a comment does not count as the first
+  occurrence in a string literal, and vice versa. In practice, the trademark
+  appears most often in the page title string and the README — mark it there
+  and you're covered.
+
 ## Working discipline
 
 - **Surface out-of-scope findings, don't bury them.** Spot a real bug, data
