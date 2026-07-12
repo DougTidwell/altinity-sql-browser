@@ -54,6 +54,9 @@ html { zoom: var(--zoom); }
   --error-bg: rgba(239, 68, 68, .08);
   --error-bd: rgba(239, 68, 68, .25);
   --error-fg: #f87171;
+  --warn-bg: rgba(217, 119, 6, .08);
+  --warn-bd: rgba(217, 119, 6, .35);
+  --warn-fg: #fbbf24;
 }
 
 [data-theme='light'] {
@@ -80,6 +83,9 @@ html { zoom: var(--zoom); }
   --error-bg: #FEF2F2;
   --error-bd: #FCA5A5;
   --error-fg: #B91C1C;
+  --warn-bg: #FFFBEB;
+  --warn-bd: #FCD34D;
+  --warn-fg: #B45309;
 }
 
 body {
@@ -358,6 +364,10 @@ body {
   margin-top: 4px; padding: 8px 12px; border-top: 1px solid var(--border-faint);
   font-size: 10.5px; color: var(--fg-faint); font-family: var(--mono);
 }
+/* Variable history (#171): a `.fm-item`-styled <label> so the whole row
+   toggles the checkbox, matching the rest of the File menu's row rhythm. */
+.fm-toggle { cursor: pointer; }
+.fm-checkbox { accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
 /* Replace / New confirm dialog */
 .fm-dialog-backdrop {
   position: fixed; inset: 0; z-index: 130; background: rgba(0,0,0,.5);
@@ -1112,6 +1122,12 @@ body.detached-tab .graph-overlay-panel {
   white-space: nowrap;
 }
 .var-name::after { content: ':'; color: var(--fg-mute); }
+/* Optional-variable affordance (#165): a parameter confined to optional filter
+   blocks may stay blank — blank keeps its predicates out instead of gating Run
+   or a dashboard tile. Its name is muted and suffixed with a "?" so the strip
+   reads required vs optional at a glance (the input title spells it out). */
+.var-field.is-optional .var-name { color: var(--fg-mute); }
+.var-field.is-optional .var-name::after { content: '?'; color: var(--fg-faint); }
 .var-input {
   height: 24px; width: 150px; padding: 0 8px;
   background: var(--bg-input); color: var(--fg);
@@ -1122,6 +1138,102 @@ body.detached-tab .graph-overlay-panel {
 .var-input:focus {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+}
+/* Typed-validation invalid affordance (#170): a value that's certainly wrong
+   for its declared type — shared by the workbench var-strip and the
+   Dashboard's global filter bar (both build on var-field.js's
+   applyFieldState). Only 'invalid' gets this; 'incomplete' (a plausible
+   mid-typing prefix) stays visually neutral until it hardens on blur/Enter/
+   execute. The reason string ("Expected UInt8 from 0 to 255") replaces the
+   field's normal title, shown via the native tooltip on hover/focus. */
+/* Conflicting-declaration affordance (#173 acceptance): the same {name} is
+   declared with disagreeing types across statements/tiles. Distinct from
+   is-invalid — the VALUE isn't wrong, the declarations disagree — so it warns
+   (amber) instead of erroring (red); the field's title lists the conflicting
+   declarations, and both the workbench var-strip and the Dashboard filter bar
+   degrade the control to a plain text input (fieldControlKind). is-invalid,
+   when both apply, wins (declared later in this sheet). */
+.var-input.is-conflict {
+  border-color: var(--warn-bd);
+  background: var(--warn-bg);
+}
+.var-input.is-conflict:focus {
+  border-color: var(--warn-bd);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--warn-fg) 22%, transparent);
+}
+.var-input.is-invalid {
+  border-color: var(--error-bd);
+  background: var(--error-bg);
+  color: var(--error-fg);
+}
+.var-input.is-invalid:focus {
+  border-color: var(--error-bd);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--error-fg) 22%, transparent);
+}
+/* Relative-time preset combobox (#169): the accessible dropdown-on-focus +
+   type-to-filter control for date-like {name:Type} variables (#174 §1) —
+   shared by the workbench var-strip and the Dashboard filter bar
+   (relative-time-field.js on top of combobox.js's generic primitive). The
+   listbox is `position: fixed` (combobox.js positions it via fixedAnchor/
+   zoomScale at open time) so it escapes the horizontally-scrolling strip's
+   own overflow clipping — the same trick the File/user menus use. */
+.var-combo { position: relative; display: inline-flex; flex-direction: column; }
+.var-combo-list {
+  position: fixed; z-index: 70; max-height: 260px; overflow-y: auto;
+  margin: 0; padding: 4px; list-style: none;
+  background: var(--bg-panel, var(--bg-editor)); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.4);
+  font-size: 12px; font-family: var(--mono);
+}
+.var-combo-list[hidden] { display: none; }
+.combo-group {
+  padding: 4px 8px 2px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--fg-faint);
+}
+.combo-option {
+  padding: 6px 8px; border-radius: 5px; cursor: pointer; white-space: nowrap;
+  color: var(--fg);
+}
+.combo-option.is-active { background: var(--bg-hover); }
+/* Live resolved-value preview (#169): pure local computation on keystroke —
+   labeled "(your time)" since it renders in the browser's own timezone,
+   which may differ from a `DateTime('tz')` column's display zone (README). */
+.var-combo-preview {
+  font-size: 10.5px; font-family: var(--mono); color: var(--fg-mute);
+  padding: 2px 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px;
+}
+.var-combo-preview.is-error { color: var(--error-fg); }
+/* Large-enum "type to narrow" hint (#172): shown only while the rendered
+   options are a capped subset of the full type-to-filter match set — the
+   member list itself is never truncated, only what's rendered per keystroke
+   (enum-field.js's `filterEnumValues`). */
+.var-combo-hint {
+  font-size: 10.5px; font-family: var(--mono); color: var(--fg-mute);
+  padding: 2px 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px;
+}
+/* "Clear recent" dropdown footer (#171, combo-footer.js) — a separate
+   position:fixed box anchored just under `.var-combo-list` (see that
+   module's header comment for why it's not rendered as an option INSIDE the
+   listbox). The visible seam between the two boxes' own shadows is a known,
+   accepted v1 limitation, same spirit as combobox.js's own reposition-on-
+   scroll note. */
+.var-combo-footer {
+  position: fixed; z-index: 70; padding: 4px;
+  background: var(--bg-panel, var(--bg-editor)); border: 1px solid var(--border); border-top: none;
+  border-radius: 0 0 8px 8px; box-shadow: 0 8px 28px rgba(0,0,0,.4);
+  font-size: 12px; font-family: var(--mono);
+}
+.var-combo-footer[hidden] { display: none; }
+.var-combo-clear {
+  width: 100%; text-align: left; padding: 5px 8px; border: none; background: transparent;
+  color: var(--fg-mute); font-family: inherit; font-size: 11px; border-radius: 5px; cursor: pointer;
+}
+.var-combo-clear:hover { background: var(--bg-hover); color: var(--fg); }
+/* Visually-hidden live region (#169's option-count/"No matches" announcement) —
+   present for assistive tech only, never visible or reflowed. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 .run-btn {
   height: 26px;

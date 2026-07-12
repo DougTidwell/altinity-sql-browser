@@ -4,6 +4,8 @@ import dagre from '@dagrejs/dagre';
 import { createApp } from '../../src/ui/app.js';
 import { createCodeMirrorEditor } from '../../src/editor/codemirror-adapter.js';
 import { AST_PROGRESSIVE_THRESHOLD } from '../../src/net/ch-client.js';
+import { libraryControls, openFileMenu } from '../../src/ui/file-menu.js';
+import { emptyRecentMap, recordRecent } from '../../src/core/recent-values.js';
 
 function jwt(payload) {
   const b = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
@@ -581,6 +583,148 @@ describe('query run', () => {
     // the SQL text itself is untouched — ClickHouse does the substitution
     expect(init.body).toContain('{database:String}');
   });
+  it('relative time (#169): a DateTime var gets the combobox — focus opens the preset list', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {from:DateTime}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    expect(input.getAttribute('role')).toBe('combobox');
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    expect(input.getAttribute('aria-expanded')).toBe('true');
+    expect(app.dom.varStrip.querySelectorAll('[role="option"]').length).toBeGreaterThan(0);
+    expect(app.dom.varStrip.querySelector('.var-combo-preview')).not.toBeNull();
+  });
+  it('relative time (#169): a non-date type gets the recents-only combobox (#171), not the date-like preset+preview one', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {n:UInt32}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    // Still a combobox (#171 gives every field a recents dropdown)...
+    expect(input.getAttribute('role')).toBe('combobox');
+    // ...but never the date-like field's preset live preview.
+    expect(app.dom.varStrip.querySelector('.var-combo-preview')).toBeNull();
+  });
+  it('relative time (#169): picking a preset inserts the expression, persists it (not the resolved value), and shows a live preview', () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([], { wallNow: () => 1751200000000 });
+    app.activeTab().sql = 'SELECT {from:DateTime}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    const opt = app.dom.varStrip.querySelector('[role="option"]'); // first preset: -15m
+    opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    expect(input.value).toBe('-15m'); // the expression stays in the field
+    expect(app.state.varValues.from).toBe('-15m'); // …and is what's stored/persisted
+    expect(JSON.parse(globalThis.localStorage.getItem('asb:varValues')).from).toBe('-15m');
+    const preview = app.dom.varStrip.querySelector('.var-combo-preview');
+    expect(preview.textContent).toContain('-15m →');
+  });
+  it('relative time (#169): an invalid (near-miss) expression disables Run with a structured reason', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {from:DateTime}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = 'now/q';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('blur', { bubbles: true })); // hardens (#170)
+    expect(app.dom.runBtn.disabled).toBe(true);
+    expect(app.dom.runBtn.title).toContain('from');
+    expect(input.classList.contains('is-invalid')).toBe(true);
+    expect(input.title).toMatch(/Not a valid relative time expression/);
+  });
+  it("relative time (#169 review finding #2): typing a near-miss stays neutral (incomplete) — Run stays enabled until blur hardens it", () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {from:DateTime}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = 'now/q';
+    input.dispatchEvent(new Event('input', { bubbles: true })); // still typing — 'input' mode
+    expect(app.dom.runBtn.disabled).toBe(false);
+    expect(input.classList.contains('is-invalid')).toBe(false);
+    expect(app.hardenedVars.has('from')).toBe(false);
+    input.dispatchEvent(new Event('blur', { bubbles: true })); // commits — 'execute' mode hardens it
+    expect(app.dom.runBtn.disabled).toBe(true);
+    expect(input.classList.contains('is-invalid')).toBe(true);
+    expect(app.hardenedVars.has('from')).toBe(true);
+    // The hardened state (#170's app.hardenedVars mechanism) persists across
+    // an unrelated re-render — the same mechanism the type-validator's own
+    // incomplete→invalid hardening already relies on, now also reached via
+    // the relative-time near-miss path (review finding #2's whole point: it
+    // routes through the exact same states, not a bespoke gate).
+    app.dom.varStripSig = null; // force renderVarStrip to rebuild the strip
+    app.renderVarStrip();
+    expect(app.dom.runBtn.disabled).toBe(true);
+    const rebuiltInput = app.dom.varStrip.querySelector('.var-input');
+    expect(rebuiltInput.classList.contains('is-invalid')).toBe(true);
+  });
+  it('relative time (#169): Enter with the preset list closed hardens/gates via the same keydown path as a plain field', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {from:DateTime}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = 'now/q';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(app.dom.runBtn.disabled).toBe(true);
+    expect(input.classList.contains('is-invalid')).toBe(true);
+  });
+  it('relative time (#169): Enter with an active preset option commits it via keydown instead of hardening the prior text', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {from:DateTime}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.focus(); // a real focus (not a synthetic dispatchEvent) — matches document.activeElement
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    expect(input.value).toBe('-15m'); // the first preset, committed — not left as invalid/empty text
+    expect(input.getAttribute('aria-expanded')).toBe('false'); // list closed by the commit
+  });
+  it('relative time (#169): a filled relative expression resolves to epoch seconds on the wave clock and re-resolves on the next run', async () => {
+    const { app, e } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]], { wallNow: () => 1751200000000 });
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    const tab = app.activeTab();
+    tab.sql = 'SELECT {from:DateTime}';
+    app.state.varValues = { from: '-1h' };
+    await app.actions.run();
+    const [url1] = app.chCtx.fetch.mock.calls[0];
+    expect(url1).toMatch(new RegExp(`param_from=${Math.round((1751200000000 - 3600000) / 1000)}(?:&|$)`));
+    // advance the injected clock and re-run: the stored expression re-resolves
+    // to a different absolute value (the moving window, #173's batch clock)
+    e.wallNow = () => 1751200000000 + 3600000;
+    app.chCtx.fetch.mockClear();
+    await app.actions.run();
+    const [url2] = app.chCtx.fetch.mock.calls[0];
+    expect(url2).toMatch(new RegExp(`param_from=${Math.round(1751200000000 / 1000)}(?:&|$)`));
+  });
+  it('relative time (#169): a Date var formats as a calendar date; non-date types are unaffected by a relative-looking value', async () => {
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]], { wallNow: () => 1751200000000 });
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    const tab = app.activeTab();
+    tab.sql = 'SELECT {day:Date}, {tag:String}';
+    app.state.varValues = { day: 'now', tag: '-1h' }; // a String var keeps a relative-looking value verbatim
+    await app.actions.run();
+    const [url] = app.chCtx.fetch.mock.calls[0];
+    const expectedDay = new Date(1751200000000).toISOString().slice(0, 10);
+    expect(url).toMatch(new RegExp(`param_day=${expectedDay}(?:&|$)`));
+    expect(url).toMatch(/param_tag=-1h(?:&|$)/);
+  });
+  it('relative time (#169): composes with an optional /*[ ]*/ block (#165) — a relative value inside an active block resolves and binds', async () => {
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]], { wallNow: () => 1751200000000 });
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    const tab = app.activeTab();
+    tab.sql = 'SELECT * FROM t WHERE 1 /*[ AND d >= {from:DateTime} ]*/';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = '-1h';
+    input.dispatchEvent(new Event('input', { bubbles: true })); // activates the block (#165) and stores the expression
+    await app.actions.run();
+    const [url, init] = app.chCtx.fetch.mock.calls[0];
+    expect(init.body).toContain('AND d >= {from:DateTime}'); // block materialized (active)
+    expect(url).toMatch(new RegExp(`param_from=${Math.round((1751200000000 - 3600000) / 1000)}(?:&|$)`));
+  });
   it('query variables (#134): a CREATE VIEW definition is sent unchanged (no substitution)', async () => {
     const { app } = appForRun([[(u, sql) => /CREATE VIEW/.test(sql), resp({ body: streamBody([]) })]]);
     await new Promise((r) => setTimeout(r));
@@ -626,6 +770,262 @@ describe('query run', () => {
     await app.actions.run(); // >1 statement → runScript → gate
     expect(app.chCtx.fetch.mock.calls.length).toBe(0);
     expect(document.body.querySelector('.share-toast').textContent).toContain('a');
+  });
+  it('query variables (#173): an Array(T) value binds as a ClickHouse array literal', async () => {
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {xs:Array(String)}';
+    app.state.varValues = { xs: ['a', "b'c"] };
+    await app.actions.run();
+    const [url] = app.chCtx.fetch.mock.calls[0];
+    expect(decodeURIComponent(url)).toContain("param_xs=['a','b\\'c']");
+  });
+  it('query variables (#173): a value that cannot serialize for the declaration blocks the run and toasts', async () => {
+    const { app } = appForRun([[() => true, resp({ body: streamBody([]) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {db:String}';
+    app.state.varValues = { db: ['not', 'scalar'] }; // array value, scalar declaration → structural
+    await app.actions.run();
+    expect(app.chCtx.fetch.mock.calls.length).toBe(0);
+    expect(document.body.querySelector('.share-toast').textContent).toContain('array value');
+  });
+  it('optional blocks (#165): Run enables with the optional param blank; the block and its arg are omitted', async () => {
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT * FROM t WHERE 1 /*[ AND d = {d:String} ]*/';
+    app.renderVarStrip();
+    expect(app.dom.runBtn.disabled).toBe(false); // blank optional never gates
+    await app.actions.run();
+    const [url, init] = app.chCtx.fetch.mock.calls[0];
+    expect(init.body).toBe('SELECT * FROM t WHERE 1 '); // inactive block removed from the wire
+    expect(url).not.toMatch(/param_d/); // its param is never sent
+  });
+  it('optional blocks (#165): typing a value activates the block — predicate included, param bound', async () => {
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT * FROM t WHERE 1 /*[ AND d = {d:String} ]*/';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = 'abc';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(app.state.filterActive.d).toBe(true); // text control syncs activation
+    await app.actions.run();
+    const [url, init] = app.chCtx.fetch.mock.calls[0];
+    expect(init.body).toBe('SELECT * FROM t WHERE 1  AND d = {d:String} '); // markers stripped, content kept
+    expect(url).toMatch(/param_d=abc/);
+  });
+  it('optional blocks (#165): the strip lists a block-only param with the optional affordance', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {y:UInt16} FROM t /*[ AND d = {d:String} ]*/';
+    app.renderVarStrip();
+    const fields = [...app.dom.varStrip.querySelectorAll('.var-field')];
+    expect(fields.map((f) => f.querySelector('.var-name').textContent)).toEqual(['y', 'd']);
+    expect(fields.map((f) => f.classList.contains('is-optional'))).toEqual([false, true]);
+    expect(fields[1].querySelector('.var-input').title).toContain('optional');
+    // the required param still gates Run
+    expect(app.dom.runBtn.disabled).toBe(true);
+    expect(app.dom.runBtn.title).toContain('y');
+    expect(app.dom.runBtn.title).not.toContain('d');
+  });
+  it('optional blocks (#165): activation persists alongside the value (own storage key)', () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT 1 /*[ AND d = {d:String} ]*/';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = 'v1';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(JSON.parse(globalThis.localStorage.getItem('asb:filterActive'))).toEqual({ d: true });
+    expect(JSON.parse(globalThis.localStorage.getItem('asb:varValues'))).toEqual({ d: 'v1' });
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(JSON.parse(globalThis.localStorage.getItem('asb:filterActive'))).toEqual({ d: false });
+  });
+  it('optional blocks (#165): a persisted active:false with a stale value keeps the block omitted', async () => {
+    vi.stubGlobal('localStorage', memStore({
+      'asb:varValues': JSON.stringify({ d: 'stale' }),
+      'asb:filterActive': JSON.stringify({ d: false }),
+    }));
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT * FROM t WHERE 1 /*[ AND d = {d:String} ]*/';
+    await app.actions.run();
+    const [url, init] = app.chCtx.fetch.mock.calls[0];
+    expect(init.body).toBe('SELECT * FROM t WHERE 1 '); // dormant value is inert
+    expect(url).not.toMatch(/param_d/);
+  });
+  it('optional blocks (#165): a template error blocks the run with a toast', async () => {
+    const { app } = appForRun([[() => true, resp({ body: streamBody([]) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT 1 /*[ AND 1 = 1 ]*/'; // parameterless block
+    await app.actions.run();
+    expect(app.chCtx.fetch.mock.calls.length).toBe(0);
+    expect(document.body.querySelector('.share-toast').textContent).toContain('optional block');
+  });
+  it('optional blocks (#165): Explain wraps the materialized statement, not the raw template', async () => {
+    const { app } = appForRun([[() => true, resp({ text: 'plan' })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT * FROM t WHERE 1 /*[ AND d = {d:String} ]*/';
+    app.state.varValues = { d: 'x' };
+    app.state.filterActive = { d: true };
+    await app.actions.explainQuery();
+    const [url, init] = app.chCtx.fetch.mock.calls.find((c) => c[1] && c[1].body);
+    expect(init.body).toMatch(/^EXPLAIN/);
+    expect(init.body).toContain('AND d = {d:String}'); // active block content in
+    expect(init.body).not.toContain('/*['); // markers never reach the server
+    expect(url).toMatch(/param_d=x/);
+  });
+  it('optional blocks (#165): a script sends each statement materialized, args per statement', async () => {
+    const { app } = appForRun([[() => true, resp({ text: '{"meta":[],"data":[]}' })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT 1 /*[ AND a = {a:String} ]*/; SELECT 2 /*[ AND b = {b:String} ]*/';
+    app.state.varValues = { a: 'x' };
+    app.state.filterActive = { a: true };
+    await app.actions.run(); // >1 statement → runScript
+    const bodies = app.chCtx.fetch.mock.calls.map((c) => c[1] && c[1].body);
+    expect(bodies).toContain('SELECT 1  AND a = {a:String} '); // active block in
+    expect(bodies).toContain('SELECT 2 '); // inactive block out
+    const aCall = app.chCtx.fetch.mock.calls.find((c) => /SELECT 1/.test(c[1].body));
+    expect(aCall[0]).toMatch(/param_a=x/);
+    const bCall = app.chCtx.fetch.mock.calls.find((c) => /SELECT 2/.test(c[1].body));
+    expect(bCall[0]).not.toMatch(/param_b/);
+  });
+  it('typed validation (#170): a clearly-invalid value shows the inline error immediately and disables Run', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {n:UInt8}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = 'abc'; // not a plausible prefix of anything — invalid, not incomplete
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(true);
+    expect(app.dom.runBtn.disabled).toBe(true);
+    expect(app.dom.runBtn.title).toContain('n');
+  });
+  it('typed validation (#170): an out-of-range value shows a specific reason, exceeding server strictness on purpose', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {n:UInt8}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = '256'; // the live server accepts this and silently wraps to 0 — blocked client-side instead
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(true);
+    expect(input.title).toBe('Expected UInt8 from 0 to 255');
+  });
+  it("typed validation (#170): a plausible mid-typing prefix ('-') stays neutral while focused, hardens on blur", () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {n:Int32}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = '-';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(false); // neutral — could still become '-5'
+    expect(app.dom.runBtn.disabled).toBe(false); // 'input' mode never hardens
+    input.dispatchEvent(new Event('blur', { bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(true); // blur commits — hardens to invalid
+    expect(app.dom.runBtn.disabled).toBe(true);
+  });
+  it('typed validation (#170 review): a hardened invalid value keeps blocking Run across unrelated re-renders, until the field itself is edited', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {n:Int32}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = '-';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('blur', { bubbles: true })); // hardens '-' to invalid
+    expect(input.classList.contains('is-invalid')).toBe(true);
+    expect(app.dom.runBtn.disabled).toBe(true);
+
+    // renderVarStrip's own tail call (fired on every SQL-editor keystroke via
+    // onDocChange) recomputes Run's gate gate-less, in lenient 'input' mode —
+    // which alone would read the still-incomplete '-' as merely incomplete
+    // and silently re-enable Run while the field still paints red. The
+    // signature is unchanged (same {n:Int32}), so this only re-derives the
+    // Run button, exactly the path that regressed.
+    app.renderVarStrip();
+    expect(app.dom.runBtn.disabled).toBe(true);
+    expect(app.dom.runBtn.title).toContain('n');
+    expect(input.classList.contains('is-invalid')).toBe(true);
+
+    // Same gate-less fallback, reached from the hasSelection effect (fires on
+    // every cursor/selection move).
+    app.state.hasSelection.value = true;
+    expect(app.dom.runBtn.disabled).toBe(true);
+
+    // Editing the field's own value clears its hardened flag — lenient
+    // 'input'-mode behavior resumes, and a now-valid value re-enables Run.
+    input.value = '-5';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(false);
+    expect(app.dom.runBtn.disabled).toBe(false);
+  });
+  it('typed validation (#170): Enter also hardens an incomplete value', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {n:Float64}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = '1e'; // live-rejected, but a genuine mid-typing state
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(false);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(true);
+    expect(app.dom.runBtn.disabled).toBe(true);
+  });
+  it('typed validation (#170): correcting an invalid value clears the affordance and re-enables Run', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {n:UInt8}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = 'abc';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(app.dom.runBtn.disabled).toBe(true);
+    input.value = '42';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(false);
+    expect(app.dom.runBtn.disabled).toBe(false);
+  });
+  it('typed validation (#170): an out-of-scope type (String) is never marked invalid', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {s:String}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = 'anything at all, ,,, {}';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.classList.contains('is-invalid')).toBe(false);
+    expect(app.dom.runBtn.disabled).toBe(false);
+  });
+  it('typed validation (#170): a run is blocked and toasts for an invalid (not just missing) variable', async () => {
+    const { app } = appForRun([[() => true, resp({ body: streamBody([]) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {n:UInt8}';
+    app.state.varValues = { n: '256' };
+    await app.actions.run();
+    expect(app.chCtx.fetch.mock.calls.length).toBe(0);
+    expect(document.body.querySelector('.share-toast').textContent).toContain('n');
+  });
+  it('typed validation (#170): a persisted invalid value paints the affordance on strip (re)build, e.g. a tab switch', () => {
+    const { app } = appForRun([]);
+    app.activeTab().sql = 'SELECT {n:UInt8}';
+    app.state.varValues = { n: '256' };
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    expect(input.classList.contains('is-invalid')).toBe(true);
+    expect(app.dom.runBtn.disabled).toBe(true);
+  });
+  it('the wall clock (#173) is its own injected seam, distinct from the duration clock', () => {
+    const app = createApp(env({ wallNow: () => 777 })); // injected → tests can pin the wave clock
+    expect(app.wallNow()).toBe(777);
+    const app2 = createApp(env()); // default → Date.now (epoch ms), while env.now stays 0
+    expect(app2.wallNow()).toBeGreaterThan(1e12);
+    expect(app2.now()).toBe(0);
   });
   it('tickElapsed updates the live ms readout, and no-ops without the element', () => {
     const { app } = appForRun([]);
@@ -1073,6 +1473,436 @@ describe('query run', () => {
     expect(app.state.resultRowLimit).toBe(1000);
     expect(runUrl(e, /SELECT 1/)).toContain('max_result_rows=1000'); // re-ran with the new cap
   });
+
+  it('run(): the args snapshot is captured at wave start — a var edit during the auth awaits does not change the sent params (review F6)', async () => {
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    app.activeTab().sql = 'SELECT {id:String}';
+    app.state.varValues = { id: 'first' };
+    const p = app.actions.run(); // runs synchronously through the gate + capture, suspends at ensureConfig/getToken
+    app.state.varValues.id = 'second'; // the mid-await edit — must apply to the NEXT run only
+    await p;
+    const urls = app.chCtx.fetch.mock.calls.map(([url]) => url);
+    expect(urls.some((u) => /param_id=first/.test(u))).toBe(true); // the gate-time snapshot was sent
+    expect(urls.some((u) => /param_id=second/.test(u))).toBe(false);
+  });
+
+  describe('enum variables (#172)', () => {
+    const ENUM_TYPE = "Enum8('active' = 1, 'deleted' = 2, 'banned' = 3)";
+    it('v1: a declared Enum8 variable renders a dropdown of its members', () => {
+      const { app } = appForRun([]);
+      app.activeTab().sql = `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}`;
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      const opts = [...app.dom.varStrip.querySelectorAll('[role="option"]')].map((o) => o.textContent);
+      expect(opts).toEqual(['active', 'deleted', 'banned']);
+    });
+    it('v1: a non-member value is gated inline (blocking — the declared type is a real Enum)', () => {
+      const { app } = appForRun([]);
+      app.activeTab().sql = `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}`;
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.value = 'nope';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+      expect(app.dom.runBtn.disabled).toBe(true);
+      expect(input.classList.contains('is-invalid')).toBe(true);
+      expect(input.title).toMatch(/Expected one of: 'active', 'deleted', 'banned'/);
+    });
+    it('v1: a bare numeric code matching a declared code passes (live-server fact)', () => {
+      const { app } = appForRun([]);
+      app.activeTab().sql = `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}`;
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.value = '2';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+      expect(app.dom.runBtn.disabled).toBe(false);
+      expect(input.classList.contains('is-invalid')).toBe(false);
+    });
+    it('v2: a String var compared to a column not yet loaded stays a plain input (no dropdown, no recents recorded)', () => {
+      const { app } = appForRun([]);
+      app.state.schema.value = [{ db: 'd', tables: [{ name: 'events', columns: null }] }];
+      app.activeTab().sql = 'SELECT * FROM events WHERE status = {s:String}';
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      expect(app.dom.varStrip.querySelectorAll('[role="option"]')).toHaveLength(0);
+    });
+    it('v2: the dropdown appears once the idle-tick loader caches the compared column as an Enum — zero new queries beyond the one column load', async () => {
+      const { app } = appForRun([
+        [(u, sql) => /system\.columns/.test(sql), resp({ json: { data: [{ name: 'status', type: ENUM_TYPE, comment: '' }] } })],
+      ]);
+      app.state.schema.value = [{ db: 'd', tables: [{ name: 'events', columns: null }] }];
+      app.activeTab().sql = 'SELECT * FROM events WHERE status = {s:String}';
+      app.renderVarStrip();
+      let input = app.dom.varStrip.querySelector('.var-input');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      expect(app.dom.varStrip.querySelectorAll('[role="option"]')).toHaveLength(0); // not loaded yet
+      await app.actions.loadColumns('d', 'events'); // the CM6 adapter's idle-tick load, or a schema-panel expand
+      // The strip's own signature guard folds in each var's resolved enum
+      // options (not just name/type/optional) — the {name:Type} SET itself
+      // never changed, only the schema cache did, and the field still upgrades.
+      input = app.dom.varStrip.querySelector('.var-input');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      const opts = [...app.dom.varStrip.querySelectorAll('[role="option"]')].map((o) => o.textContent);
+      expect(opts).toEqual(['active', 'deleted', 'banned']);
+    });
+    it('v2: a non-member value still executes (suggestion-only — the declared type stays String)', async () => {
+      const { app } = appForRun([
+        [(u, sql) => /system\.columns/.test(sql), resp({ json: { data: [{ name: 'status', type: ENUM_TYPE, comment: '' }] } })],
+        [(u, sql) => /SELECT \* FROM events/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })],
+      ]);
+      app.state.schema.value = [{ db: 'd', tables: [{ name: 'events', columns: null }] }];
+      app.activeTab().sql = 'SELECT * FROM events WHERE status = {s:String}';
+      app.renderVarStrip();
+      await app.actions.loadColumns('d', 'events');
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.value = 'not-a-member';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+      expect(input.classList.contains('is-invalid')).toBe(false);
+      expect(app.dom.runBtn.disabled).toBe(false);
+      await app.actions.run();
+      expect(app.chCtx.fetch.mock.calls.some(([url]) => /param_s=not-a-member/.test(url))).toBe(true);
+    });
+    it('v1: Enter with no active option (list closed) falls through to the plain hard-commit/harden path', () => {
+      const { app } = appForRun([]);
+      app.activeTab().sql = `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}`;
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.value = 'nope';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      expect(app.dom.runBtn.disabled).toBe(true);
+      expect(input.classList.contains('is-invalid')).toBe(true);
+    });
+    it('v1: Enter with an active option commits it via keydown (combobox delegation)', () => {
+      const { app } = appForRun([]);
+      app.activeTab().sql = `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}`;
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.focus();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      expect(input.value).toBe('active'); // the first member, committed
+      expect(input.getAttribute('aria-expanded')).toBe('false');
+    });
+    it('v2: ambiguous (JOIN, unqualified column) degrades silently to a plain input', () => {
+      const { app } = appForRun([]);
+      app.state.schema.value = [{ db: 'd', tables: [
+        { name: 'events', columns: [{ name: 'status', type: ENUM_TYPE }] },
+        { name: 'other', columns: [] },
+      ] }];
+      app.activeTab().sql = 'SELECT * FROM events e JOIN other o ON 1=1 WHERE status = {s:String}';
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      expect(app.dom.varStrip.querySelectorAll('[role="option"]')).toHaveLength(0);
+    });
+    it('v2: a background column load never steals focus mid-typing — the strip rebuild defers until blur, then applies', async () => {
+      const { app } = appForRun([
+        [(u, sql) => /system\.columns/.test(sql), resp({ json: { data: [{ name: 'status', type: ENUM_TYPE, comment: '' }] } })],
+      ]);
+      app.state.schema.value = [{ db: 'd', tables: [{ name: 'events', columns: null }] }];
+      app.activeTab().sql = 'SELECT * FROM events WHERE status = {s:String} AND r = {region:String}';
+      app.renderVarStrip();
+      const region = app.dom.varStrip.querySelectorAll('.var-input')[1];
+      region.focus(); // real focus: sets document.activeElement AND fires the field's focus listener (dropdown opens)
+      region.value = 'us-';
+      region.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(region.getAttribute('aria-expanded')).toBe('true'); // recents dropdown open (empty is fine — it's open state that matters)
+      // The background idle-tick column load completes while the user is
+      // mid-typing in the UNRELATED region field: the {s} upgrade must NOT
+      // rebuild the strip out from under them.
+      await app.actions.loadColumns('d', 'events');
+      expect(document.activeElement).toBe(region);                              // focus survived
+      expect(app.dom.varStrip.querySelectorAll('.var-input')[1]).toBe(region);  // same node — no rebuild
+      expect(region.value).toBe('us-');                                         // typed text survived
+      expect(region.getAttribute('aria-expanded')).toBe('true');                // open dropdown survived
+      // On blur (focus leaves the strip) the deferred upgrade applies: the
+      // strip rebuilds and {s} now offers the schema-cache-inferred dropdown.
+      region.blur();
+      const rebuilt = app.dom.varStrip.querySelectorAll('.var-input');
+      expect(rebuilt[1]).not.toBe(region); // strip was rebuilt after blur
+      expect(rebuilt[1].value).toBe('us-'); // the typed value carried through varValues
+      rebuilt[0].dispatchEvent(new Event('focus', { bubbles: true }));
+      const opts = [...app.dom.varStrip.querySelectorAll('[role="option"]')].map((o) => o.textContent);
+      expect(opts).toEqual(['active', 'deleted', 'banned']);
+    });
+    it('v2: a comparison inside a /*[ ]*/ optional block still matches — the scan runs on the analysis materialization, not the raw SQL (review F2)', () => {
+      const { app } = appForRun([]);
+      app.state.schema.value = [{ db: 'd', tables: [{ name: 't', columns: [{ name: 'status', type: ENUM_TYPE }] }] }];
+      // In the RAW text this whole comparison is one opaque comment span.
+      app.activeTab().sql = 'SELECT * FROM t WHERE 1 /*[ AND status = {s:String} ]*/';
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      const opts = [...app.dom.varStrip.querySelectorAll('[role="option"]')].map((o) => o.textContent);
+      expect(opts).toEqual(['active', 'deleted', 'banned']);
+    });
+    it('v2: alias-qualified + unqualified refs to the same single-table column still get the dropdown (review F3: resolved identity, not qualifier text)', () => {
+      const { app } = appForRun([]);
+      app.state.schema.value = [{ db: 'd', tables: [{ name: 'events', columns: [{ name: 'status', type: ENUM_TYPE }] }] }];
+      app.activeTab().sql = 'SELECT * FROM events e WHERE e.status = {s:String} OR status = {s:String}';
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      const opts = [...app.dom.varStrip.querySelectorAll('[role="option"]')].map((o) => o.textContent);
+      expect(opts).toEqual(['active', 'deleted', 'banned']);
+    });
+    it('a type-conflicted variable renders a plain input with a visible warning — the enum control is disabled (#173 acceptance, review F1)', () => {
+      const { app } = appForRun([]);
+      app.activeTab().sql = `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}; SELECT {status:String}`;
+      app.renderVarStrip();
+      const input = app.dom.varStrip.querySelector('.var-input');
+      expect(input.classList.contains('is-conflict')).toBe(true); // visible warning, distinct from is-invalid
+      expect(input.classList.contains('is-invalid')).toBe(false);
+      expect(input.title).toContain('Conflicting type declarations');
+      expect(input.title).toContain('String');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      // No member dropdown: the field degraded to the plain (recents-only) control.
+      expect(app.dom.varStrip.querySelectorAll('[role="option"]')).toHaveLength(0);
+    });
+    it('v2: moving focus BETWEEN strip fields keeps the deferred rebuild pending — it only applies once focus leaves the strip', async () => {
+      const { app } = appForRun([
+        [(u, sql) => /system\.columns/.test(sql), resp({ json: { data: [{ name: 'status', type: ENUM_TYPE, comment: '' }] } })],
+      ]);
+      app.state.schema.value = [{ db: 'd', tables: [{ name: 'events', columns: null }] }];
+      app.activeTab().sql = 'SELECT * FROM events WHERE status = {s:String} AND r = {region:String}';
+      app.renderVarStrip();
+      const inputs = app.dom.varStrip.querySelectorAll('.var-input');
+      const sInput = inputs[0];
+      const region = inputs[1];
+      region.focus();
+      await app.actions.loadColumns('d', 'events'); // deferred: focus is inside the strip
+      // Tabbing from region to the s field: the focusout's relatedTarget is
+      // still inside the strip, so the deferral holds — no rebuild yet.
+      region.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: sInput }));
+      expect(app.dom.varStrip.querySelectorAll('.var-input')[1]).toBe(region);
+      // Focus finally leaves the strip → the deferred upgrade applies.
+      region.blur();
+      expect(app.dom.varStrip.querySelectorAll('.var-input')[1]).not.toBe(region);
+    });
+  });
+});
+
+describe('recent-value history (#171)', () => {
+  function appForRun(routes, over) {
+    const e = env({ fetch: makeFetch(routes), ...over });
+    const app = createApp(e);
+    app.renderApp();
+    return { app, e };
+  }
+
+  it('a successful single-statement run records its boundParams (rawValue, not the resolved value)', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]], { wallNow: () => 1751200000000 });
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {from:DateTime}';
+    app.state.varValues = { from: '-1h' };
+    await app.actions.run();
+    expect(app.state.varRecent.byName.from.map((e) => e.value)).toEqual(['-1h']); // the expression, never the epoch timestamp
+    expect(JSON.parse(globalThis.localStorage.getItem('asb:varRecent')).byName.from[0].value).toBe('-1h');
+  });
+
+  it('a failed statement records nothing', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([[() => true, resp({ ok: false, status: 500, text: 'DB::Exception: boom' })]]);
+    app.activeTab().sql = 'SELECT {id:String}';
+    app.state.varValues = { id: 'nope' };
+    await app.actions.run();
+    expect(app.state.varRecent.byName.id).toBeUndefined();
+  });
+
+  it('script (#173): statement 1 of a later-failing script records; the failing statement (and anything after it) does not', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([
+      [(u, sql) => /SELECT \{a:String\}/.test(sql), resp({ text: JSON.stringify({ meta: [{ name: 'a', type: 'String' }], data: [['x']] }) })],
+      [(u, sql) => /SELECT \{b:String\}/.test(sql), resp({ ok: false, status: 500, text: 'DB::Exception: boom' })],
+    ]);
+    app.activeTab().sql = 'SELECT {a:String}; SELECT {b:String}; SELECT {c:String}';
+    app.state.varValues = { a: 'va', b: 'vb', c: 'vc' };
+    await app.actions.run(); // >1 statement → runScript, stops after statement 2 fails
+    expect(app.state.varRecent.byName.a.map((e) => e.value)).toEqual(['va']);
+    expect(app.state.varRecent.byName.b).toBeUndefined();
+    expect(app.state.varRecent.byName.c).toBeUndefined(); // never even attempted
+  });
+
+  it('a param confined to an inactive optional block is never recorded, even with a non-empty stored value (#165)', async () => {
+    vi.stubGlobal('localStorage', memStore({
+      'asb:varValues': JSON.stringify({ d: 'stale' }),
+      'asb:filterActive': JSON.stringify({ d: false }),
+    }));
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT * FROM t WHERE 1 /*[ AND d = {d:String} ]*/';
+    await app.actions.run();
+    expect(app.state.varRecent.byName.d).toBeUndefined();
+  });
+
+  it('an empty string is never recorded, even when actively bound (#165 allows a real empty-string bind)', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT * FROM t WHERE 1 /*[ AND d = {d:String} ]*/';
+    app.state.varValues = { d: '' };
+    app.state.filterActive = { d: true }; // explicitly active despite the blank value
+    await app.actions.run();
+    expect(app.state.varRecent.byName.d).toBeUndefined();
+  });
+
+  it('re-running a known value moves it to the front, no duplicate; caps and MRU order follow core/recent-values.js', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {tenant:String}';
+    app.state.varValues = { tenant: 'acme' };
+    await app.actions.run();
+    app.state.varValues = { tenant: 'other' };
+    await app.actions.run();
+    app.state.varValues = { tenant: 'acme' }; // re-use → move-to-front, no duplicate
+    await app.actions.run();
+    expect(app.state.varRecent.byName.tenant.map((e) => e.value)).toEqual(['acme', 'other']);
+  });
+
+  it('the disable-history preference stops new recording; existing history is retained', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {id:String}';
+    app.state.varValues = { id: 'first' };
+    await app.actions.run();
+    app.state.varRecentDisabled = true;
+    app.state.varValues = { id: 'second' };
+    await app.actions.run();
+    expect(app.state.varRecent.byName.id.map((e) => e.value)).toEqual(['first']); // not recorded, nothing lost
+  });
+
+  it('recorded recents persist across reload (state layer round-trip, shared like varValues)', async () => {
+    const store = memStore();
+    vi.stubGlobal('localStorage', store);
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {tenant:String}';
+    app.state.varValues = { tenant: 'acme' };
+    await app.actions.run();
+    const { app: app2 } = appForRun([]); // fresh app, same localStorage — simulates a reload
+    expect(app2.state.varRecent.byName.tenant.map((e) => e.value)).toEqual(['acme']);
+  });
+
+  it('the var-strip recents dropdown lists newest-first, filters as you type, click inserts and leaves the field editable', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {tenant:String}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    // Type each value into the real field (not a direct state write) — the
+    // var-strip's own <input> DOM node is built once per {name:Type}
+    // signature and only reflects state.varValues through its own typing
+    // path, exactly like a real user run.
+    input.value = 'acme';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await app.actions.run();
+    input.value = 'other';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await app.actions.run();
+    // Reopen on a blank field (a fresh look at "everything recorded so far",
+    // not filtered by whatever text happens to already be in the box).
+    input.value = '';
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    expect([...app.dom.varStrip.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toEqual(['other', 'acme']);
+    input.value = 'ac';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect([...app.dom.varStrip.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toEqual(['acme']);
+    const optAcme = app.dom.varStrip.querySelector('[role="option"]');
+    optAcme.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    expect(input.value).toBe('acme');
+    expect(input.readOnly).toBe(false); // field stays editable — never becomes select-only
+  });
+
+  it('"Clear recent" (the dropdown footer) empties just that field\'s history', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]]);
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {tenant:String}';
+    app.state.varValues = { tenant: 'acme' };
+    await app.actions.run();
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    const clearBtn = app.dom.varStrip.querySelector('button.var-combo-clear');
+    clearBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    expect(app.state.varRecent.byName.tenant).toBeUndefined();
+  });
+
+  it('a date-like field composes ONE dropdown: Recent first, then Presets (user decision, phase-7 feedback)', async () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([[(u, sql) => /SELECT/.test(sql), resp({ body: streamBody(['{"row":{}}\n']) })]], { wallNow: () => 1751200000000 });
+    await new Promise((r) => setTimeout(r));
+    app.chCtx.fetch.mockClear();
+    app.activeTab().sql = 'SELECT {from:DateTime}';
+    app.renderVarStrip();
+    const input = app.dom.varStrip.querySelector('.var-input');
+    input.value = '-3h'; // not one of RELATIVE_TIME_PRESETS
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await app.actions.run();
+    // Reopen on a blank field so the group check isn't itself filtered by
+    // whatever text happens to already be in the box.
+    input.value = '';
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    const groups = [...app.dom.varStrip.querySelectorAll('.combo-group')].map((g) => g.textContent);
+    expect(groups).toEqual(['Recent', 'Presets']);
+    expect([...app.dom.varStrip.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toContain('-3h');
+  });
+
+  it('app.clearVarRecent clears one name and is a no-op (no re-persist) for a name with no history', () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([]);
+    app.state.varRecent = { version: 1, nextSeq: 2, byName: { a: [{ value: '1', seq: 1 }] } };
+    app.saveVarRecent = vi.fn(app.saveVarRecent);
+    app.clearVarRecent('nope'); // no history for this name → no-op
+    expect(app.state.varRecent.byName.a).toBeDefined();
+    expect(app.saveVarRecent).not.toHaveBeenCalled();
+    app.clearVarRecent('a');
+    expect(app.state.varRecent.byName.a).toBeUndefined();
+    expect(app.saveVarRecent).toHaveBeenCalledTimes(1);
+  });
+
+  it('app.clearAllVarRecent resets every name\'s history and persists', () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([]);
+    app.state.varRecent = { version: 1, nextSeq: 3, byName: { a: [{ value: '1', seq: 1 }], b: [{ value: '2', seq: 2 }] } };
+    app.clearAllVarRecent();
+    expect(app.state.varRecent).toEqual({ version: 1, nextSeq: 1, byName: {} });
+    expect(JSON.parse(globalThis.localStorage.getItem('asb:varRecent'))).toEqual({ version: 1, nextSeq: 1, byName: {} });
+  });
+
+  it('the File menu\'s "Clear all recent values" + preference toggle drive the same app seams', () => {
+    vi.stubGlobal('localStorage', memStore());
+    const { app } = appForRun([]);
+    app.state.varRecent = recordRecent(emptyRecentMap(), 'a', '1');
+    for (const node of libraryControls(app)) document.body.appendChild(node);
+    openFileMenu(app);
+    const checkbox = document.querySelector('.fm-checkbox');
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(app.state.varRecentDisabled).toBe(true);
+    expect(JSON.parse(globalThis.localStorage.getItem('asb:varRecentDisabled'))).toBe(true);
+    const clearAll = [...document.querySelectorAll('.fm-item')].find((b) => /Clear all recent values/.test(b.textContent));
+    clearAll.dispatchEvent(new Event('click', { bubbles: true }));
+    expect(app.state.varRecent.byName.a).toBeUndefined();
+    document.body.replaceChildren();
+  });
 });
 
 describe('formatQuery', () => {
@@ -1163,6 +1993,32 @@ describe('formatQuery', () => {
     app.activeTab().sql = 'select 1; select 2'; // now a script
     await app.actions.formatQuery();
     expect(app.root.querySelector('.results-error')).toBeNull();
+  });
+  it('optional blocks (#165): a single statement with a block is skipped with a notice — no server call', async () => {
+    const { app, e } = appFor([]);
+    await Promise.resolve(); // let render's loadVersion/loadSchema settle
+    e.fetch.mockClear();
+    app.activeTab().sql = 'select 1 /*[ AND d = {d:String} ]*/';
+    app.editor.replaceDocument('select 1 /*[ AND d = {d:String} ]*/');
+    await app.actions.formatQuery();
+    expect(e.fetch).not.toHaveBeenCalled(); // never round-tripped through formatQuery()
+    expect(app.editor.getValue()).toBe('select 1 /*[ AND d = {d:String} ]*/'); // untouched
+    expect(document.body.querySelector('.share-toast').textContent)
+      .toContain('optional blocks — not formatted');
+  });
+  it('optional blocks (#165): a script formats the other statements and skips the template with a notice', async () => {
+    const { app, e } = appFor([
+      [(u, sql) => /formatQuery/.test(sql), resp({ json: { data: [{ q: 'SELECT 1' }] } })],
+    ]);
+    app.activeTab().sql = 'select 1; select 2 /*[ AND d = {d:String} ]*/';
+    await app.actions.formatQuery();
+    expect(app.editor.getValue()).toBe('SELECT 1;\n\nselect 2 /*[ AND d = {d:String} ]*/\n');
+    expect(document.body.querySelector('.share-toast').textContent)
+      .toContain('1 statement contains optional blocks — not formatted');
+    // exactly one formatQuery round trip — the template statement never went out
+    const fmtCalls = e.fetch.mock.calls.filter((c) => /formatQuery/.test(c[1] && c[1].body));
+    expect(fmtCalls).toHaveLength(1);
+    expect(fmtCalls[0][1].body).not.toContain('{d:String}');
   });
   it('setFmtBtn toggles a busy/spinner state and no-ops without the button', () => {
     const { app } = appFor([]);

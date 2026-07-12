@@ -9,7 +9,221 @@ auto-generated per-PR notes; this file is the curated, human-readable history.
 
 ## [Unreleased]
 
+### Added
+- **Optional SQL blocks `/*[ … ]*/` with explicit filter activation** (#165).
+  A comment-wrapped predicate — `WHERE 1 /*[ AND d = {d:String} ]*/` — is
+  included only while every parameter inside it is active; a blank filter now
+  means "no filter" instead of blocking the run. The raw template is
+  SQL-transparent (each block is a plain comment to any tool that doesn't know
+  the convention, so it runs anywhere with all filters inactive), and values
+  still bind only through native `{name:Type}` parameters — never
+  interpolated. Wired through the #173 pipeline's two materializations: the
+  all-active *analysis view* feeds the variables strip, the dashboard filter
+  bar and affected-tile detection (block-only params get an "optional"
+  affordance and never gate Run/tiles), and the *execution view* is what runs
+  and exports — parameters of omitted blocks are never sent as `param_` args.
+  Activation is explicit state (`state.filterActive`, persisted alongside
+  `varValues`, blank ⇒ inactive for text controls, not carried in share
+  links). Non-row-returning statements are never materialized; nested,
+  unbalanced, parameterless, `;`-containing, whole-statement, or
+  `*/`-containing blocks produce clear errors; and the Format action skips a
+  statement containing blocks (with a notice) rather than round-tripping a
+  template through server-side `formatQuery()`.
+- **Typed client-side validation for `{name:Type}` variable inputs** (#170).
+  A value is now checked against its declared type *before* the query is
+  sent, for the numeric/scalar families that are cheap to validate purely:
+  `Int8…Int256`/`UInt8…UInt256` (range-checked via `BigInt`; wraps like
+  `256` for `UInt8` are blocked client-side even though ClickHouse's param
+  path would silently accept and wrap them), `Float32`/`Float64` (decimal /
+  scientific notation, `inf`/`nan`), `Bool` (a narrow, never-`invalid`
+  accept-set — its live accept grammar isn't fully enumerable), and `UUID`
+  (hyphenated or 32-hex compact). `String`/`Array`/`Map`/`Decimal`/`Enum`/
+  `Date*` and any unrecognized type are always passed through unvalidated
+  (`Enum` membership is #172; `Date`/`DateTime` relative expressions are
+  #169). New pure `src/core/param-validate.js` (100% covered) plugs into
+  #173's pipeline as its validation stage. A value is `invalid` only when
+  ClickHouse's actual param-value grammar (verified live — not the SQL
+  literal grammar) certainly rejects it; a plausible mid-typing prefix
+  (`-`, `1e`, a half UUID) reads as neutral `incomplete` while the field is
+  focused and hardens to the inline error on blur/Enter/execute. The
+  workbench var-strip and the Dashboard's global filter bar (#149 D3) share
+  one small affordance (`src/ui/var-field.js`) for the invalid-field styling
+  + reason tooltip; an invalid value gates exactly like an unfilled one (Run
+  disabled workbench-side, the tile placeholder dashboard-side). Also fixes
+  two dormant gaps the validation stage exposed: the Run button's disabled
+  state now reflects `invalid`/source errors, not just `missing` (previously
+  only visually out of sync with the actual gate), and a field whose value
+  fails serialization no longer rolls up as `ok` in `prepareParameterizedBatch`'s
+  per-field state.
+- **Relative time expressions for date/time variables** (#169). A
+  `Date`/`Date32`/`DateTime`/`DateTime64(N)` (any `Nullable(…)`-wrapped)
+  variable now accepts Grafana-grammar relative expressions — `-1h`,
+  `now-7d`, `now/d` — alongside absolute values: the stored value is the
+  expression, so it re-resolves against "now" on every workbench Run,
+  Dashboard load/Refresh, or filter-change wave instead of freezing a
+  timestamp the moment it's typed. New pure `src/core/relative-time.js`
+  (100% covered) — `resolveRelativeValue`/`isDateLikeType`/
+  `resolveVarValues` — parses the grammar (case-sensitive units; `s`/`m`/`h`
+  offsets are fixed durations, `d`/`w`/`M`/`y` offsets and all `/u` rounding
+  are local-timezone calendar arithmetic with DST-safe "same wall-clock time"
+  semantics and month-end clamping) and formats per declared type (local
+  calendar date / integer epoch seconds / epoch seconds with an `N`-digit
+  fraction — live-verified against ClickHouse 26.3.13's `param_*` path). A
+  near-miss expression (starts `now…` or sign+digits but fails to parse)
+  gates via #170's existing invalid-field machinery, following its exact
+  incomplete→invalid timing: neutral and non-blocking while still being
+  typed (`now-`, `-1`, ordinary keystrokes toward a valid expression), and
+  hardened to the visible inline error only on blur/Enter/execute — no
+  second affordance, no separate timing model (review fix, post-merge).
+  Plugs into #173's pipeline as the real `resolveRelativeValue` stage
+  (previously identity). The UI is the first consumer of a new accessible
+  type-to-filter combobox primitive (`src/ui/combobox.js`, #174 §1 — full
+  keyboard map, ARIA `combobox`/`listbox`/`option` roles, IME-composition
+  safety, mousedown-before-blur commit, `aria-describedby` wired to the
+  preview/error element) composed in `src/ui/relative-time-field.js` with a
+  live preview of the resolved instant as a human-readable local calendar
+  string (`-1h → 2026-07-11 09:23:45 (your time)`) — never the wire value
+  actually sent, which stays epoch seconds/date per the declared type; both
+  the workbench var-strip and the Dashboard's global filter bar (#149 D3)
+  upgrade their date-like fields to it, unchanged for every other type.
+  Resolved instants are FLOORED to the whole second for every date/time type
+  (never rounded), so `DateTime` and `DateTime64(0)` agree on the same
+  instant and a resolved `now` never lands a second in the future.
+- **Shared parameter pipeline (Phase 7.0)** (#173). A pure, two-phase,
+  multi-source parameter pipeline — `analyzeParameterizedSources` (per-field
+  declarations across all occurrences, per-source requiredness, cross-source
+  type-conflict diagnostics) and `prepareParameterizedBatch` (per-source
+  `{statements, missing, invalid, errors, runnable}` verdicts, immutable
+  `boundParams` snapshots, per-param field states) — that
+  #165/#169/#170/#171/#172/#160/#175 plug into (#165/#169/#170 via their own
+  stage seams, real from their entries above; #171 below reads the
+  `boundParams` output directly rather than overriding a stage; #172/#160/
+  #175 still identity/unknown until they land). Includes a typed serializer: `Array(T)` values bind as ClickHouse
+  array literals with correct quote/backslash escaping, big integers
+  (`UInt64`/`UInt128`/`UInt256`, `Int128`/`Int256`) stay strings end-to-end
+  (never through a JS `Number`), and scalar-string values remain
+  byte-identical to before. Serialization is per-statement by the local
+  declaration; a structurally incompatible stored value blocks only its own
+  source — on the dashboard, one bad tile never blocks its siblings. Execution
+  waves share one separately-injected wall clock (`env.wallNow`), distinct
+  from the `performance.now`-based duration clock.
+- **Per-variable recent-value history with an MRU dropdown** (#171). Every
+  `{name:Type}` field now remembers its **10 most recently used** values,
+  offered in a dropdown on focus (type-to-filter, click inserts, Esc/blur
+  closes — the field stays free-text). A value is recorded only when a
+  statement or dashboard tile **completes successfully**, read straight from
+  that statement's #173 `boundParams` snapshot: a failed statement records
+  nothing, statement 1 of a later-failing script still records, a param
+  confined to an inactive #165 optional block is never recorded, and an
+  empty string is never recorded even when actively bound. A relative-time
+  value (#169) records the typed *expression* (`-1h`), never the resolved
+  instant, so it keeps re-resolving on reuse. New pure
+  `src/core/recent-values.js` (100% covered): `recordRecent`/`clearRecent`/
+  `clearAllRecent` (MRU insert, exact-string dedupe/move-to-front, a 10-per-
+  name cap and a ~100-entry global-LRU total cap across all names), plus
+  `visibleRecents`/`filterRecentValues`/`recentOptions` — the render-time
+  helper that hides (never deletes) a recent #170's validator marks invalid
+  for the field's *current* declared type, so it reappears once viewed
+  through a compatible declaration. Storage is `asb:varRecent`
+  (versioned + sequence-stamped, name-keyed like `varValues`, shared/
+  persisted the same way — plaintext, same exposure). Two new UI seams
+  compose the existing accessible combobox primitive (`src/ui/combobox.js`,
+  #174 §1) rather than building a second control: `src/ui/recent-field.js`
+  (recents-only, for every non-date-like field) and an extension to
+  `src/ui/relative-time-field.js` (adds an optional `getRecents` that
+  upgrades its dropdown into ONE combined list — presets first, then a
+  "Recent" group). A separate `src/ui/combo-footer.js` renders the per-field
+  "Clear recent" affordance as its own small `position:fixed` box anchored
+  under the listbox (kept out of `combobox.js` itself, whose `listEl` is
+  fully owned by its own render pass, and out of the listbox's own
+  `role="option"` items, where a destructive action would be an ARIA
+  regression). The header **File** menu gains a "Variable history" section:
+  a "Remember recent variable values" preference (recording off, existing
+  history retained until cleared) and a "Clear all recent values" action —
+  the closest thing the app has to a settings surface today. Both the
+  workbench variables strip (app.js) and the Dashboard's global filter bar
+  (#149 D3, dashboard.js) record on their respective success paths and share
+  the same dropdown/footer wiring.
+- **Enum variables render as a dropdown of their allowed values** (#172), two
+  tiers, zero new network requests. **v1 (declared type, both surfaces):** a
+  variable declared `{name:Enum8(…)}`/`Enum16(…)` (`Nullable(…)` unwrapped)
+  gets a dropdown listing its member names, parsed straight out of the
+  declaration by new pure `enumMembers`/`enumValues` (`src/core/param-type.js`,
+  100% covered — reuses the shared string-span scanner so escaped quotes
+  (`'a''b'`), braces (`'}'`), spacing variants, negative codes, and unicode
+  member names all parse exactly like ClickHouse's own literal grammar, and
+  implicit auto-numbered members — `Enum8('hello', 'world')`,
+  `Enum8('One' = 1, 'Two', 'Three')` — get their real codes with ClickHouse's
+  previous-code+1 rule).
+  Membership is enforced (#170's invalid affordance, blocking) via a new
+  `param-validate.js` branch: a LIVE-VERIFIED server fact (ClickHouse 26.3.13)
+  is that a bare numeric code string (`1`) is ALSO accepted for a declared
+  Enum param, binding as the member with that code — so validation accepts
+  member names AND matching numeric codes (a strict digit prefix of a declared
+  code, like `1` on the way to code `12`, stays neutral while typing, same as
+  a member-name prefix), rejecting everything else with a
+  reason that lists (and, past 8, samples + counts) the allowed values. Works
+  in both the workbench variables strip and the Dashboard filter bar, since
+  the declaration travels with the tile SQL. **v2 (schema-cache inference,
+  workbench only, suggestions — never blocking):** a plain `{s:String}`
+  compared directly to a column (`col = {s}` or `{s} = col`, qualified/aliased
+  forms included — an expression, `IN`, `BETWEEN`, or the same param compared
+  to two different columns all yield no match) whose *cached* type (#84's
+  schema cache) is an Enum offers the identical dropdown, purely as
+  suggestions: the declared type stays `String`, so a non-member still
+  executes — the cache can lag the server. New pure
+  `src/core/param-comparison.js` (`paramComparisonColumns`, 100% covered) finds
+  the syntactic column reference; a new `resolveComparisonColumnType` in
+  `src/core/from-scope.js` resolves it against the statement's FROM scope and
+  the loaded schema (exactly one confident match required — ambiguous or
+  not-yet-loaded degrades silently to a plain input, upgrading automatically
+  once the column lands on the existing idle-tick loader; a background load
+  that completes while the user is focused inside the variables strip DEFERS
+  the strip rebuild until that field blurs, so it never steals focus, wipes
+  in-progress text, or closes an open dropdown mid-typing). **Third consumer of
+  the shared combobox** (`src/ui/combobox.js`, #174 §1) via new
+  `src/ui/enum-field.js`: enum values render under a "Values" header once
+  recents (#171) are also wired (paired labeling, exactly relative-time-
+  field.js's own rule), a large `Enum16` (thousands of members) type-to-filters
+  the COMPLETE member list first and only then caps the rendered rows at
+  `ENUM_DROPDOWN_CAP` (≈200) with a "type to narrow" hint, so a member past the
+  cap stays reachable by typing. `param-scan.js` gained a position-carrying
+  `scanParamOccurrences` (the existing `scanParamDeclarations` is now a thin
+  wrapper over it) so v2 can locate each param occurrence's FROM scope.
+
 ### Fixed
+- **Phase 7 whole-branch review fixes** (#173/#165/#169/#170/#171/#172).
+  Type-conflicted `{name}` declarations now *surface*: the field carries
+  `conflict` through `fieldControls`, degrades to a plain text input on both
+  the workbench var-strip and the dashboard filter bar (never a one-sided enum
+  or date control), and shows an amber `.is-conflict` warning whose tooltip
+  lists the disagreeing declarations. The #172 v2 schema-cache scan runs on the
+  analysis materialization, so a `col = {p}` comparison inside a `/*[ … ]*/`
+  optional block gets its dropdown too; and comparison-column conflicts are
+  decided on *resolved* identity, not raw qualifier text (`e.status` +
+  `status` in a single-table query now match; JOIN sides still don't).
+  "Clear recent" now also empties the open dropdown list; a recent that
+  duplicates a rendered enum member/preset is no longer listed twice; every
+  execution path (run / script / both exports) captures its prepared args at
+  wave start, so a value edited during a token-refresh await can no longer
+  desync from the gate; the array-element serializer now shares the
+  validator's live-verified Int/Float token grammar (rejects `007`, accepts
+  `inf`/`nan`); and the var strip no longer analyzes the same SQL twice per
+  editor keystroke. Manual-testing follow-ups (PR #176): a date-like field's
+  combined dropdown now lists **Recent first, then Presets** (a recorded
+  expression that duplicates a preset surfaces under Recent, not Presets —
+  the enum/plain-recents fields are unchanged, still Values/plain-first);
+  the "Clear recent" footer no longer lingers on screen after an option is
+  picked via mousedown (`combobox.js` gained a shared `onClose` hook so every
+  field module's footer hides on the same close path, not just focus/input/
+  keydown/blur); and the README's Enum section now spells out that a bare
+  `{o:Enum8}`/`{o:Enum16}` is rejected by ClickHouse (`Enum data type cannot
+  be empty`) rather than inferring the dropdown.
+- **Multi-statement SQL now binds query parameters per statement everywhere**
+  (#155, absorbed by #173). `paramArgs` gated on the leading keyword of the
+  whole text, so a favorite like `SET x = 1; SELECT {year:UInt16}` never
+  received `param_year`; every gate/exec call site in the workbench and the
+  dashboard now consumes the pipeline's per-statement batch instead.
 - **Schema panel: a broken table in one data-lake-catalog database no longer
   hides every catalog database's tables** (#162). `loadSchema` queried
   `system.tables` across every database in one shot; once ClickHouse resolves

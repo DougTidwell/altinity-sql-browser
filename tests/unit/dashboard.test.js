@@ -2,13 +2,14 @@ import { describe, it, expect, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
 import {
   isDashboardRoute, configBase, dashboardTileSql, parseJsonResult, classifyTile,
-  normalizeDashLayout, normalizeDashCols, dashboardParams,
+  normalizeDashLayout, normalizeDashCols,
 } from '../../src/core/dashboard.js';
 import {
   AUTH_SS_KEYS, AUTH_REQUEST, AUTH_GRANT,
   snapshotAuth, restoreAuth, hasAuth, isAuthRequest, isAuthGrant,
 } from '../../src/core/auth-handoff.js';
 import { renderDashboard } from '../../src/ui/dashboard.js';
+import { emptyRecentMap, recordRecent } from '../../src/core/recent-values.js';
 import { makeApp, FakeChart } from '../helpers/fake-app.js';
 import { createApp } from '../../src/ui/app.js';
 import { createCodeMirrorEditor } from '../../src/editor/codemirror-adapter.js';
@@ -126,26 +127,9 @@ describe('normalizeDashCols', () => {
   });
 });
 
-describe('dashboardParams', () => {
-  it('unions params across favorites, unique by name, first-appearance order', () => {
-    const favorites = [
-      { sql: 'SELECT * FROM t WHERE y = {year:UInt16}' },
-      { sql: 'SELECT * FROM u WHERE y = {year:UInt16} AND r = {region:String}' },
-    ];
-    expect(dashboardParams(favorites)).toEqual([
-      { name: 'year', type: 'UInt16' },
-      { name: 'region', type: 'String' },
-    ]);
-  });
-  it('ignores a param that only appears in a non-row-returning statement', () => {
-    const favorites = [{ sql: "CREATE VIEW v AS SELECT {x:String}" }];
-    expect(dashboardParams(favorites)).toEqual([]);
-  });
-  it('is defensive about an empty/absent favorites list', () => {
-    expect(dashboardParams([])).toEqual([]);
-    expect(dashboardParams(undefined)).toEqual([]);
-  });
-});
+// (dashboardParams moved into the parameter pipeline in #165 — the filter bar's
+// field discovery is now `fieldControls(analysis)`, tested with the pipeline in
+// param-pipeline.test.js and end-to-end in the filter-bar suite below.)
 
 // ── core/auth-handoff.js ─────────────────────────────────────────────────────
 function memSession(initial = {}) {
@@ -465,6 +449,38 @@ describe('renderDashboard — global filter bar (#149 D3)', () => {
     expect(filters.querySelectorAll('.var-field').length).toBe(0);
   });
 
+  it('a param declared with conflicting types across two favorites renders a plain input with a visible warning (#173 acceptance, review F1)', async () => {
+    const favorites = [
+      paramFav('1', 'SELECT * FROM t WHERE i = {id:UInt64}'),
+      paramFav('2', 'SELECT * FROM u WHERE i = {id:String}'),
+    ];
+    const app = dashApp(favorites, vi.fn(async () => chartResult()));
+    app.state.varValues = { id: '7' };
+    await renderDashboard(app);
+    const input = fieldInput(app.root, 'id');
+    expect(input.classList.contains('is-conflict')).toBe(true); // visible warning, distinct from is-invalid
+    expect(input.title).toContain('Conflicting type declarations: UInt64 vs String');
+  });
+
+  it('a conflicted Enum-declared filter degrades to a plain input — the member dropdown is disabled (review F1)', async () => {
+    const favorites = [
+      paramFav('1', "SELECT * FROM t WHERE s = {s:Enum8('a' = 1, 'b' = 2)}"),
+      paramFav('2', 'SELECT * FROM u WHERE s = {s:String}'),
+    ];
+    const app = dashApp(favorites, vi.fn(async () => chartResult()));
+    await renderDashboard(app);
+    const input = fieldInput(app.root, 's');
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    expect(app.root.querySelectorAll('[role="option"]')).toHaveLength(0); // no member dropdown
+    expect(input.classList.contains('is-conflict')).toBe(true);
+    // A non-conflicted enum filter keeps its dropdown (control degradation is per-field).
+    const app2 = dashApp([paramFav('1', "SELECT * FROM t WHERE s = {s:Enum8('a' = 1, 'b' = 2)}")], vi.fn(async () => chartResult()));
+    await renderDashboard(app2);
+    const input2 = fieldInput(app2.root, 's');
+    input2.dispatchEvent(new Event('focus', { bubbles: true }));
+    expect([...app2.root.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toEqual(['a', 'b']);
+  });
+
   it('renders one field per param detected across favorites, first-appearance order', async () => {
     const favorites = [
       paramFav('1', 'SELECT * FROM t WHERE y = {year:UInt16}'),
@@ -584,6 +600,31 @@ describe('renderDashboard — global filter bar (#149 D3)', () => {
     expect(app.root.querySelector('.dash-tile-unfilled')).toBeNull();
   });
 
+  it('per-source gating (#173): a value that cannot serialize errors only its own tile', async () => {
+    const favorites = [
+      paramFav('1', 'SELECT * FROM t WHERE db = {db:String}'),
+      { id: '2', name: 'Good', sql: 'SELECT k, v FROM good', favorite: true },
+    ];
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp(favorites, runTile);
+    app.state.varValues = { db: ['not', 'scalar'] }; // array value, scalar declaration → structural
+    await renderDashboard(app);
+    // the broken tile never fetched, the sibling did — one bad source blocks nothing else
+    expect(runTile).toHaveBeenCalledTimes(1);
+    expect(runTile.mock.calls[0][0]).toBe('SELECT k, v FROM good');
+    expect(app.root.querySelector('.dash-tile-error').textContent).toContain('array value');
+    expect(app.root.querySelector('.dash-tile canvas')).not.toBeNull();
+  });
+
+  it('tiles fetch with the wave\'s prepared args (#173), not by re-deriving per tile', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE y = {year:UInt16}')];
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp(favorites, runTile);
+    app.state.varValues = { year: '2024' };
+    await renderDashboard(app);
+    expect(runTile).toHaveBeenCalledWith('SELECT * FROM t WHERE y = {year:UInt16}', { param_year: '2024' });
+  });
+
   it('discards a stale response when a newer edit\'s response arrives first (last edit wins)', async () => {
     const favorites = [paramFav('1', 'SELECT * FROM t WHERE y = {year:UInt16}')];
     const resolvers = [];
@@ -596,12 +637,14 @@ describe('renderDashboard — global filter bar (#149 D3)', () => {
     resolvers[0](chartResult());
     await rendered;
 
+    // Distinct but still UInt16-valid values (#170: an invalid value would
+    // never reach app.runTile at all, short-circuiting this race).
     const input = fieldInput(app.root, 'year');
-    setInput(input, 'A');
+    setInput(input, '11');
     pressEnter(input);
     await flush();
     expect(resolvers).toHaveLength(2);
-    setInput(input, 'B');
+    setInput(input, '22');
     pressEnter(input);
     await flush();
     expect(resolvers).toHaveLength(3);
@@ -613,6 +656,377 @@ describe('renderDashboard — global filter bar (#149 D3)', () => {
     await flush();
 
     expect(app.root.querySelector('.dash-tile-error').textContent).toBe('B wins');
+  });
+
+  // ── #170: typed client-side validation ──────────────────────────────────────
+  it('#170: an invalid value shows the inline error and gates the tile like an unfilled one', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE y = {year:UInt16}')];
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp(favorites, runTile);
+    app.state.varValues = { year: '2023' };
+    await renderDashboard(app);
+    expect(runTile).toHaveBeenCalledTimes(1);
+    const input = fieldInput(app.root, 'year');
+    setInput(input, 'abc');
+    pressEnter(input);
+    await flush();
+    expect(runTile).toHaveBeenCalledTimes(1); // never re-fetched with the bad value
+    expect(input.classList.contains('is-invalid')).toBe(true);
+    expect(app.root.querySelector('.dash-tile-unfilled').textContent).toBe('Enter a value for: year');
+  });
+  it("#170: a plausible mid-typing prefix stays neutral while typing, hardens on blur", () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE y = {year:Int32}')];
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp(favorites, runTile);
+    app.state.varValues = { year: '5' };
+    return renderDashboard(app).then(async () => {
+      const input = fieldInput(app.root, 'year');
+      setInput(input, '-');
+      expect(input.classList.contains('is-invalid')).toBe(false); // neutral — could still become '-5'
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+      await flush();
+      expect(input.classList.contains('is-invalid')).toBe(true); // blur hardens it
+    });
+  });
+  it('#170: correcting an invalid value clears the affordance and re-runs the tile', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE y = {year:UInt16}')];
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp(favorites, runTile);
+    app.state.varValues = { year: '2023' };
+    await renderDashboard(app);
+    const input = fieldInput(app.root, 'year');
+    setInput(input, 'abc');
+    pressEnter(input);
+    await flush();
+    expect(app.root.querySelector('.dash-tile-unfilled')).not.toBeNull();
+    setInput(input, '2025');
+    pressEnter(input);
+    await flush();
+    expect(input.classList.contains('is-invalid')).toBe(false);
+    expect(app.root.querySelector('.dash-tile-unfilled')).toBeNull();
+    expect(runTile).toHaveBeenCalledTimes(2); // initial + the corrected re-run
+  });
+
+  // ── #165: optional blocks on the dashboard ────────────────────────────────
+  const optFav = (id) => paramFav(id, 'SELECT * FROM t WHERE 1 /*[ AND d = {d:String} ]*/');
+
+  it('#165: a block-only param is listed in the filter bar with the optional affordance', async () => {
+    const app = dashApp([optFav('1')], vi.fn(async () => chartResult()));
+    await renderDashboard(app);
+    const field = app.root.querySelector('.dash-filters .var-field');
+    expect(field.classList.contains('is-optional')).toBe(true);
+    expect(field.querySelector('.var-name').textContent).toBe('d');
+    expect(fieldInput(app.root, 'd').title).toContain('optional');
+  });
+
+  it('#165: a blank optional filter deactivates the predicate instead of blocking — the tile runs materialized', async () => {
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp([optFav('1')], runTile); // no value, no activation
+    await renderDashboard(app);
+    expect(app.root.querySelector('.dash-tile-unfilled')).toBeNull(); // NOT gated
+    expect(runTile).toHaveBeenCalledTimes(1);
+    const [sql, args] = runTile.mock.calls[0];
+    expect(sql).toBe('SELECT * FROM t WHERE 1 '); // block omitted from the wire text
+    expect(args).toEqual({}); // param_d never sent
+  });
+
+  it('#165: typing a value activates the block — the affected tile re-runs with the predicate + arg', async () => {
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp([optFav('1')], runTile);
+    await renderDashboard(app);
+    const input = fieldInput(app.root, 'd');
+    setInput(input, 'abc');
+    expect(app.state.filterActive.d).toBe(true); // text control syncs activation
+    expect(app.saveFilterActive).toHaveBeenCalled();
+    pressEnter(input);
+    await flush();
+    expect(runTile).toHaveBeenCalledTimes(2);
+    const [sql, args] = runTile.mock.calls[1];
+    expect(sql).toBe('SELECT * FROM t WHERE 1  AND d = {d:String} ');
+    expect(args).toEqual({ param_d: 'abc' });
+    // …and blanking it flips activation off and re-runs without the predicate.
+    setInput(input, '');
+    expect(app.state.filterActive.d).toBe(false);
+    pressEnter(input);
+    await flush();
+    expect(runTile).toHaveBeenCalledTimes(3);
+    expect(runTile.mock.calls[2]).toEqual(['SELECT * FROM t WHERE 1 ', {}]);
+  });
+
+  it('#165: a required (non-block) param still blocks the tile with the placeholder', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE y = {y:UInt16} /*[ AND d = {d:String} ]*/')];
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp(favorites, runTile);
+    await renderDashboard(app);
+    expect(runTile).not.toHaveBeenCalled();
+    expect(app.root.querySelector('.dash-tile-unfilled').textContent).toBe('Enter a value for: y');
+    // the required field carries no optional affordance
+    expect(fieldInput(app.root, 'y').closest('.var-field').classList.contains('is-optional')).toBe(false);
+  });
+
+  it('#165: a stale persisted value with activation off keeps the block omitted', async () => {
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp([optFav('1')], runTile);
+    app.state.varValues = { d: 'stale' };
+    app.state.filterActive = { d: false };
+    await renderDashboard(app);
+    expect(runTile.mock.calls[0]).toEqual(['SELECT * FROM t WHERE 1 ', {}]);
+  });
+
+  it('#165: a block-free favorite keeps its exact bytes on the wire', async () => {
+    const runTile = vi.fn(async () => chartResult());
+    const sql = 'SELECT * FROM t WHERE y = {year:UInt16};'; // trailing ; kept verbatim
+    const app = dashApp([paramFav('1', sql)], runTile);
+    app.state.varValues = { year: '2024' };
+    await renderDashboard(app);
+    expect(runTile).toHaveBeenCalledWith(sql, { param_year: '2024' });
+  });
+
+  describe('#169 relative time', () => {
+    it('a date-like param gets the preset+preview combobox; a non-date param gets the #171 recents-only combobox (no preview)', async () => {
+      const favorites = [paramFav('1', 'SELECT * FROM t WHERE d >= {from:DateTime} AND r = {region:String}')];
+      const app = dashApp(favorites, vi.fn(async () => chartResult()));
+      app.state.varValues = { from: '-1h', region: 'us' };
+      await renderDashboard(app);
+      const fromInput = fieldInput(app.root, 'from');
+      const regionInput = fieldInput(app.root, 'region');
+      expect(fromInput.getAttribute('role')).toBe('combobox');
+      expect(regionInput.getAttribute('role')).toBe('combobox'); // #171: every field is a combobox now
+      expect(fromInput.closest('.var-field').querySelector('.var-combo-preview')).not.toBeNull();
+      expect(regionInput.closest('.var-field').querySelector('.var-combo-preview')).toBeNull();
+    });
+    it('picking a preset inserts the expression, persists it, and commits IMMEDIATELY — bypassing the debounce', async () => {
+      vi.useFakeTimers();
+      try {
+        const favorites = [paramFav('1', 'SELECT * FROM t WHERE d >= {from:DateTime}')];
+        const runTile = vi.fn(async () => chartResult());
+        const app = dashApp(favorites, runTile);
+        app.state.varValues = { from: 'now' };
+        await renderDashboard(app);
+        expect(runTile).toHaveBeenCalledTimes(1);
+        const input = fieldInput(app.root, 'from');
+        input.dispatchEvent(new Event('focus', { bubbles: true }));
+        // The field already holds 'now' (the current value), so opening on
+        // focus filters to presets matching it — the first match is 'now/d'.
+        const opt = app.root.querySelector('[role="option"]');
+        opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        expect(input.value).toBe('now/d');
+        expect(app.state.varValues.from).toBe('now/d');
+        await vi.advanceTimersByTimeAsync(0); // let the immediate commit's microtasks settle — no 500ms wait needed
+        expect(runTile).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    it('an invalid (near-miss) expression shows the tile placeholder and never calls runTile', async () => {
+      const favorites = [paramFav('1', 'SELECT * FROM t WHERE d >= {from:DateTime}')];
+      const runTile = vi.fn(async () => chartResult());
+      const app = dashApp(favorites, runTile);
+      app.state.varValues = { from: 'now' };
+      await renderDashboard(app);
+      expect(runTile).toHaveBeenCalledTimes(1);
+      const input = fieldInput(app.root, 'from');
+      setInput(input, 'now/q');
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+      await flush();
+      expect(runTile).toHaveBeenCalledTimes(1); // no new run — the invalid value never bound
+      expect(app.root.querySelector('.dash-tile-unfilled')).not.toBeNull();
+      expect(input.classList.contains('is-invalid')).toBe(true);
+    });
+    it('Enter with the list closed hardens/gates via the same keydown path as a plain filter field', async () => {
+      const favorites = [paramFav('1', 'SELECT * FROM t WHERE d >= {from:DateTime}')];
+      const runTile = vi.fn(async () => chartResult());
+      const app = dashApp(favorites, runTile);
+      app.state.varValues = { from: 'now' };
+      await renderDashboard(app);
+      const input = fieldInput(app.root, 'from');
+      setInput(input, 'now/q');
+      pressEnter(input);
+      await flush();
+      expect(input.classList.contains('is-invalid')).toBe(true);
+      expect(runTile).toHaveBeenCalledTimes(1); // never re-ran with the invalid value
+    });
+    it('Enter with an active preset option commits it via keydown instead of hardening the prior text', async () => {
+      vi.useFakeTimers();
+      try {
+        const favorites = [paramFav('1', 'SELECT * FROM t WHERE d >= {from:DateTime}')];
+        const runTile = vi.fn(async () => chartResult());
+        const app = dashApp(favorites, runTile);
+        app.state.varValues = { from: 'now' };
+        await renderDashboard(app);
+        const input = fieldInput(app.root, 'from');
+        // app.root isn't attached to `document` in this test harness, so a
+        // real input.focus() can't land — dispatch the synthetic event
+        // combo's own 'focus' listener reacts to, same as this file's other
+        // combobox tests.
+        input.dispatchEvent(new Event('focus', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        expect(input.value).toBe('now/d'); // filtered to 'now'-matching presets; first match
+        expect(input.getAttribute('aria-expanded')).toBe('false');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runTile).toHaveBeenCalledTimes(2); // committed immediately, bypassing the debounce
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    it('a Refresh resolves one wallNow across every tile; a later Refresh with an advanced clock moves the window', async () => {
+      const favorites = [
+        paramFav('1', 'SELECT * FROM t WHERE d >= {from:DateTime}'),
+        paramFav('2', 'SELECT * FROM u WHERE d >= {from:DateTime}'),
+      ];
+      const runTile = vi.fn(async () => chartResult());
+      const app = makeApp({ runTile, wallNow: vi.fn(() => 1751200000000) });
+      app.state.savedQueries = favorites;
+      app.state.varValues = { from: '-1h' };
+      await renderDashboard(app);
+      const expected1 = String(Math.round((1751200000000 - 3600000) / 1000));
+      expect(runTile.mock.calls[0][1]).toEqual({ param_from: expected1 });
+      expect(runTile.mock.calls[1][1]).toEqual({ param_from: expected1 }); // same instant, both tiles
+      app.wallNow = () => 1751200000000 + 3600000; // advance the clock, then Refresh
+      const refreshBtn = app.root.querySelector('.dash-btn');
+      refreshBtn.click();
+      await flush();
+      const expected2 = String(Math.round(1751200000000 / 1000));
+      expect(runTile.mock.calls[2][1]).toEqual({ param_from: expected2 });
+      expect(runTile.mock.calls[3][1]).toEqual({ param_from: expected2 });
+    });
+    it('the stored expression persists and restores — not the resolved value', async () => {
+      const favorites = [paramFav('1', 'SELECT * FROM t WHERE d >= {from:DateTime}')];
+      const app = dashApp(favorites, vi.fn(async () => chartResult()));
+      app.state.varValues = { from: '-1h' };
+      await renderDashboard(app);
+      expect(fieldInput(app.root, 'from').value).toBe('-1h');
+      expect(app.saveVarValues).not.toHaveBeenCalled(); // nothing edited yet — just restored
+    });
+  });
+
+  // #172 v1 — the Dashboard only ever gets the declared-type dropdown (the
+  // declaration travels with the tile SQL); v2's schema-cache inference is
+  // workbench-only (no schema cache here).
+  describe('#172 enum variables (v1, from the tile SQL declaration)', () => {
+    const ENUM_TYPE = "Enum8('active' = 1, 'deleted' = 2, 'banned' = 3)";
+    it('renders a dropdown of the declared members', async () => {
+      const favorites = [paramFav('1', `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}`)];
+      const app = dashApp(favorites, vi.fn(async () => chartResult()));
+      await renderDashboard(app);
+      const input = fieldInput(app.root, 'status');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      const opts = [...app.root.querySelectorAll('[role="option"]')].map((o) => o.textContent);
+      expect(opts).toEqual(['active', 'deleted', 'banned']);
+    });
+    it('gates a non-member value inline (blocking, since the declared type is a real Enum)', async () => {
+      const favorites = [paramFav('1', `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}`)];
+      const runTile = vi.fn(async () => chartResult());
+      const app = dashApp(favorites, runTile);
+      await renderDashboard(app);
+      const input = fieldInput(app.root, 'status');
+      setInput(input, 'nope');
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+      await flush();
+      expect(input.classList.contains('is-invalid')).toBe(true);
+      expect(app.root.querySelector('.dash-tile-unfilled')).not.toBeNull();
+    });
+    it('a bare numeric code matching a declared code is accepted (live-server fact)', async () => {
+      const favorites = [paramFav('1', `SELECT * FROM t WHERE status = {status:${ENUM_TYPE}}`)];
+      const runTile = vi.fn(async () => chartResult());
+      const app = dashApp(favorites, runTile);
+      await renderDashboard(app);
+      const input = fieldInput(app.root, 'status');
+      setInput(input, '2');
+      pressEnter(input);
+      await flush();
+      expect(input.classList.contains('is-invalid')).toBe(false);
+      expect(runTile).toHaveBeenLastCalledWith(expect.any(String), { param_status: '2' });
+    });
+    it('a non-enum String param keeps the plain recents combobox (no v2 here — no schema cache on the Dashboard)', async () => {
+      const favorites = [paramFav('1', 'SELECT * FROM t WHERE r = {region:String}')];
+      const app = dashApp(favorites, vi.fn(async () => chartResult()));
+      await renderDashboard(app);
+      const input = fieldInput(app.root, 'region');
+      input.dispatchEvent(new Event('focus', { bubbles: true }));
+      expect(app.root.querySelectorAll('[role="option"]')).toHaveLength(0); // no recents recorded, no enum values
+    });
+  });
+});
+
+// ── D3 + #171: recent-value recording + the recents dropdown ────────────────
+describe('renderDashboard — recent values (#171)', () => {
+  const paramFav = (id, sql) => ({ id, name: id, sql, favorite: true });
+  const fieldInput = (root, name) => root.querySelector('.var-field input[aria-label="' + name + '"]');
+
+  it('records the wave\'s boundParams on a successful tile completion', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE y = {year:UInt16}')];
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp(favorites, runTile);
+    app.state.varValues = { year: '2024' };
+    await renderDashboard(app);
+    expect(app.recordBoundParams).toHaveBeenCalledTimes(1);
+    expect(app.recordBoundParams.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ name: 'year', rawValue: '2024' }),
+    ]);
+  });
+
+  it('never records on a failed tile', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE y = {year:UInt16}')];
+    const runTile = vi.fn(async () => ({ error: 'boom' }));
+    const app = dashApp(favorites, runTile);
+    app.state.varValues = { year: '2024' };
+    await renderDashboard(app);
+    expect(app.recordBoundParams).not.toHaveBeenCalled();
+  });
+
+  it('an omitted-optional-block param is never in the recorded boundParams', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE 1 /*[ AND d = {d:String} ]*/')];
+    const runTile = vi.fn(async () => chartResult());
+    const app = dashApp(favorites, runTile);
+    await renderDashboard(app); // d blank → block inactive → not bound at all
+    expect(app.recordBoundParams).toHaveBeenCalledTimes(1);
+    expect(app.recordBoundParams.mock.calls[0][0]).toEqual([]);
+  });
+
+  it('a non-date field shows recorded recents on focus, newest-first, filtered as you type', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE r = {region:String}')];
+    const app = dashApp(favorites, vi.fn(async () => chartResult()));
+    let map = emptyRecentMap();
+    map = recordRecent(map, 'region', 'us');
+    map = recordRecent(map, 'region', 'eu');
+    app.state.varRecent = map;
+    await renderDashboard(app);
+    const input = fieldInput(app.root, 'region');
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    expect([...app.root.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toEqual(['eu', 'us']);
+    input.value = 'us';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect([...app.root.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toEqual(['us']);
+  });
+
+  it('clicking a recent inserts it; "Clear recent" calls app.clearVarRecent(name)', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE r = {region:String}')];
+    const app = dashApp(favorites, vi.fn(async () => chartResult()));
+    app.state.varRecent = recordRecent(emptyRecentMap(), 'region', 'us');
+    await renderDashboard(app);
+    const input = fieldInput(app.root, 'region');
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    const opt = app.root.querySelector('[role="option"]');
+    opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    expect(input.value).toBe('us');
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    const clearBtn = app.root.querySelector('button.var-combo-clear');
+    clearBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    expect(app.clearVarRecent).toHaveBeenCalledWith('region');
+  });
+
+  it('a date-like field composes ONE dropdown: Recent first, then Presets (user decision, phase-7 feedback)', async () => {
+    const favorites = [paramFav('1', 'SELECT * FROM t WHERE d >= {from:DateTime}')];
+    const app = dashApp(favorites, vi.fn(async () => chartResult()));
+    app.state.varRecent = recordRecent(emptyRecentMap(), 'from', '-3h'); // not a built-in preset
+    await renderDashboard(app);
+    const input = fieldInput(app.root, 'from');
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    const groups = [...app.root.querySelectorAll('.combo-group')].map((g) => g.textContent);
+    expect(groups).toEqual(['Recent', 'Presets']);
+    expect([...app.root.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toContain('-3h');
   });
 });
 
@@ -682,6 +1096,27 @@ describe('app.runTile', () => {
     await app.runTile('SELECT {year:UInt16} AS n');
     const queryCall = fetch.mock.calls.find((c) => c[1] && c[1].method === 'POST');
     expect(queryCall[0]).toContain('param_year=2024');
+  });
+  it('prepares per-statement, so a multi-statement favorite still binds its params (#155)', async () => {
+    // paramArgs over the whole blob saw the leading SET and skipped substitution
+    // entirely; the pipeline splits first, so param_year rides along.
+    const fetch = makeFetch([[(u, sql) => /SELECT/.test(sql || ''),
+      resp({ json: { meta: [{ name: 'n', type: 'UInt64' }], data: [{ n: 1 }] } })]]);
+    const app = createApp(appEnv({ fetch }));
+    app.state.varValues.year = '2024';
+    await app.runTile('SET x = 1; SELECT {year:UInt16} AS n');
+    const queryCall = fetch.mock.calls.find((c) => c[1] && c[1].method === 'POST');
+    expect(queryCall[0]).toContain('param_year=2024');
+  });
+  it('explicit prepared args win over self-preparation (the dashboard wave passes them)', async () => {
+    const fetch = makeFetch([[(u, sql) => /SELECT/.test(sql || ''),
+      resp({ json: { meta: [{ name: 'n', type: 'UInt64' }], data: [{ n: 1 }] } })]]);
+    const app = createApp(appEnv({ fetch }));
+    app.state.varValues.year = '1999'; // must NOT be read — the caller's batch is authoritative
+    await app.runTile('SELECT {year:UInt16} AS n', { param_year: '2024' });
+    const queryCall = fetch.mock.calls.find((c) => c[1] && c[1].method === 'POST');
+    expect(queryCall[0]).toContain('param_year=2024');
+    expect(queryCall[0]).not.toContain('param_year=1999');
   });
   it('errors (without driving sign-out) when there is no token', async () => {
     const app = createApp(appEnv({ sessionStorage: memSession({}) }));

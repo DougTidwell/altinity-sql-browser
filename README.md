@@ -85,6 +85,119 @@ zero third-party requests. On top of it:
   variable name** — shared across every query and persisted across reloads — so a
   value typed once is prefilled wherever the same variable appears. (This is
   `{name:Type}` substitution, not the `{{name}}` composable-query macro.)
+- **Optional filter blocks** — an empty filter can also mean "no filter": wrap
+  a predicate in a comment-marked block and it is included only while every
+  parameter inside it has a value:
+
+  ```sql
+  SELECT * FROM events
+  WHERE tenant_id = {tenant_id:UInt64}
+  /*[ AND d = {d:String} ]*/
+  ```
+
+  Here `tenant_id` stays required, while a blank `d` simply removes the whole
+  `AND d = …` predicate before the query is sent (typing a value puts it back
+  and re-binds `param_d`; parameters of an omitted block are never sent). The
+  strip marks such block-only parameters optional (`name?`), and the Dashboard
+  filter bar behaves the same way — a blank optional filter runs the tile
+  unfiltered instead of blocking it. Values are never interpolated into the
+  SQL: the materialized query still carries `{name:Type}` placeholders and
+  ClickHouse does the typed substitution. The syntax is **SQL-transparent**: to
+  any tool that doesn't know the convention (an external client, server-side
+  `formatQuery()`, a code review) each block is an ordinary comment, so the raw
+  template parses and runs anywhere — with all filters inactive, which is
+  exactly the intended default. Limitations (each rejected with a clear error,
+  never silently mangled): blocks don't nest, must contain at least one
+  parameter, and can't hold a `;` or a whole statement; block content can never
+  contain `*/` in any form — not even inside a string literal, where
+  ClickHouse's comment lexer would still end the comment early (an in-string
+  `*/` or `]*/` is reported as "content ends inside a string literal").
+  Non-row-returning statements (DDL, parameterized views) are never
+  materialized. Because
+  server-side `formatQuery()` would strip the markers, **Format skips a
+  statement containing optional blocks** (with a notice) and formats the rest
+  of the script normally.
+- **Relative time expressions** — a variable declared with a date/time type
+  (`Date`, `Date32`, `DateTime`, `DateTime64(N)`, any `Nullable(…)` of those)
+  accepts a relative expression instead of an absolute value — `-1h`,
+  `now-7d`, `now/d` — so a "last hour of logs" or "yesterday's traffic" query
+  keeps a **moving window**: the stored value is the expression, and it
+  re-resolves against "now" every time it runs (workbench Run, Dashboard
+  load/Refresh, a filter-change wave) rather than freezing at the moment it
+  was typed. Grammar (Grafana's, adopted verbatim — case-sensitive units):
+
+  ```text
+  expr := 'now' [sign amount unit] [rounding]
+        | sign amount unit [rounding]        -- shorthand: '-1h' ≡ 'now-1h'
+  sign := '-' | '+'
+  unit := s | m | h | d | w | M | y          -- m = minute, M = month
+  rounding := '/' unit                        -- always snaps DOWN, after the offset
+  ```
+
+  | Input | Meaning |
+  |---|---|
+  | `now` | current instant |
+  | `-1h` | one hour ago (`now-1h`) |
+  | `-30s`, `-15m`, `-1d`, `-1w`, `-1M`, `-1y` | an offset in each unit |
+  | `now/d` | start of today |
+  | `-1d/d` | start of yesterday |
+  | `now/w` | start of this week (ISO-8601 — Monday) |
+  | `now/M` | start of this month |
+  | `now-1h/h` | start of the hour, one hour ago (offset first, then round) |
+
+  `s`/`m`/`h` offsets are **fixed durations** (exact elapsed time); `d`/`w`/`M`/`y`
+  offsets and all `/u` rounding are **calendar arithmetic in your local
+  timezone** — `-1d` means "the same wall-clock time yesterday" even across a
+  23/25-hour DST transition day, and month/year offsets clamp to the target
+  month's last day (`Mar 31` `-1M` → `Feb 28`/`29`). An absolute value keeps
+  working unchanged; a string that merely *looks* relative (starts `now…`, or
+  a sign followed by digits) but doesn't fully parse is rejected inline,
+  never sent. Values still travel as native `param_<name>` arguments — never
+  interpolated — formatted per the declared type: `Date`/`Date32` as a local
+  calendar date, `DateTime` as integer epoch seconds, `DateTime64(N)` as epoch
+  seconds with an `N`-digit fraction.
+
+  The field gets a **preset dropdown** on focus (type-to-filter; click
+  inserts the expression — the field stays free-text, so an absolute
+  timestamp still works) and a **live preview** of the resolved instant next
+  to it, e.g. `-1h → 2026-07-11 09:23:45 (your time)`. That preview always
+  renders in **your browser's timezone** and says so — a `DateTime('Europe/
+  Madrid')` column *displays* its stored value in its own zone, but the bound
+  instant is identical either way (transport is epoch seconds); only the
+  wall-clock rendering differs. The trade-off this implies: "now" is the
+  **client's** clock, which can skew from the server's `now()` — the same
+  trade-off Grafana makes, accepted rather than compensated for.
+- **Recent values** — every `{name:Type}` field also remembers the **10 most
+  recently used** values per variable name, offered in a dropdown on focus
+  (type-to-filter; click inserts, Esc/blur closes, the field stays free-text).
+  A value is recorded only when a statement or dashboard tile **completes
+  successfully** — never on a keystroke, never from a failed statement — and
+  only the params that were actually sent (a param confined to an inactive
+  optional filter block, or left blank, is never recorded). For a relative
+  time expression the **typed expression** is remembered (`-1h`), not the
+  resolved instant, so it keeps re-resolving on reuse; a date-like field's
+  dropdown combines its presets and recents in one list. History is
+  name-keyed and shared across every query/tab/dashboard exactly like
+  `varValues` — persisted in the browser's `localStorage`, so it is
+  **plaintext, same exposure as `varValues`**: don't put secrets in a
+  variable's value. "Clear recent" (per field) and "Clear all recent
+  values" + a "Remember recent variable values" toggle live in the header
+  **File** menu.
+- **Enum-valued dropdown** — a variable declared `{name:Enum8(…)}` /
+  `Enum16(…)` gets a dropdown of its member names, parsed straight out of the
+  declaration (type-to-filter; click inserts). A **bare** `{o:Enum}` /
+  `{o:Enum8}` / `{o:Enum16}` — no member list in the braces — is **not** a
+  valid ClickHouse parameter type: the server rejects it outright with
+  `Enum data type cannot be empty` (verified live on 26.3.13), so there's no
+  way to get the dropdown by declaring an empty Enum and letting the workbench
+  fill in the members. Two ways to actually get it: paste the **full**
+  `Enum8('a'=1,'b'=2,…)` type into the declaration for a real, blocking
+  validation (a non-member value is rejected on both the workbench and the
+  Dashboard filter bar); or, workbench only, declare the variable as
+  `{o:String}` and compare it directly to the Enum column
+  (`WHERE operation = {o:String}`) — the dropdown is then inferred from that
+  column's *cached* schema type, offered purely as a **suggestion**: the
+  declared type stays `String`, so a value that isn't a member still runs.
 
 **The keystroke rule:** none of this runs SQL while you type. Reference data —
 the server's keyword and function lists — is fetched **once per connection**

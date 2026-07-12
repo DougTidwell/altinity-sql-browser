@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { fromScopeAt, pendingColumnLoads } from '../../src/core/from-scope.js';
+import { fromScopeAt, pendingColumnLoads, resolveComparisonColumnType } from '../../src/core/from-scope.js';
 
 // Caret at the end of the text unless a position is given — from-scope reads the
 // whole statement, so the caret only selects which statement (not which clause).
@@ -167,5 +167,144 @@ describe('pendingColumnLoads', () => {
       { db: 'app', table: 'events' },
       { db: 'other', table: 'events' },
     ]);
+  });
+});
+
+// #172 v2: resolving a paramComparisonColumns syntactic ref against the FROM
+// scope + the loaded schema cache — the last step before the schema-cache
+// enum suggestion can show up.
+describe('resolveComparisonColumnType', () => {
+  const ENUM_STATUS = "Enum8('active' = 1, 'deleted' = 2)";
+  const schemaWith = (columns) => [
+    { db: 'app', tables: [{ name: 'events', columns }] },
+  ];
+
+  it('resolves an unqualified column in a single-table statement', () => {
+    const sql = 'SELECT * FROM events WHERE status = {s:String}';
+    const schema = schemaWith([{ name: 'status', type: ENUM_STATUS }]);
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, schema)).toBe(ENUM_STATUS);
+  });
+
+  it('resolves an aliased/qualified column via its FROM alias', () => {
+    const sql = 'SELECT * FROM events e WHERE e.status = {s:String}';
+    const schema = schemaWith([{ name: 'status', type: ENUM_STATUS }]);
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: 'e', column: 'status' }, schema)).toBe(ENUM_STATUS);
+  });
+
+  it('resolves a qualifier that is the bare table name (no alias used)', () => {
+    const sql = 'SELECT * FROM events WHERE events.status = {s:String}';
+    const schema = schemaWith([{ name: 'status', type: ENUM_STATUS }]);
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: 'events', column: 'status' }, schema)).toBe(ENUM_STATUS);
+  });
+
+  it('unqualified + more than one table in scope (JOIN) is ambiguous → null', () => {
+    const sql = 'SELECT * FROM events e JOIN other o ON 1=1 WHERE status = {s:String}';
+    const schema = schemaWith([{ name: 'status', type: ENUM_STATUS }]);
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, schema)).toBeNull();
+  });
+
+  it('a qualifier that matches no in-scope alias/table → null', () => {
+    const sql = 'SELECT * FROM events e WHERE x.status = {s:String}';
+    const schema = schemaWith([{ name: 'status', type: ENUM_STATUS }]);
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: 'x', column: 'status' }, schema)).toBeNull();
+  });
+
+  it('a column not yet loaded (columns null/loading) → null', () => {
+    const sql = 'SELECT * FROM events WHERE status = {s:String}';
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, schemaWith(null))).toBeNull();
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, schemaWith('loading'))).toBeNull();
+  });
+
+  it('a column that does not exist on the resolved table → null', () => {
+    const sql = 'SELECT * FROM events WHERE nope = {s:String}';
+    const schema = schemaWith([{ name: 'status', type: ENUM_STATUS }]);
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'nope' }, schema)).toBeNull();
+  });
+
+  it('an unqualified column resolves across every same-named db table when they agree', () => {
+    const sql = 'SELECT * FROM events WHERE status = {s:String}';
+    const schema = [
+      { db: 'app', tables: [{ name: 'events', columns: [{ name: 'status', type: ENUM_STATUS }] }] },
+      { db: 'other', tables: [{ name: 'events', columns: [{ name: 'status', type: ENUM_STATUS }] }] },
+    ];
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, schema)).toBe(ENUM_STATUS);
+  });
+
+  it('conflicting types for the same unqualified column across dbs → null (not guessed at)', () => {
+    const sql = 'SELECT * FROM events WHERE status = {s:String}';
+    const schema = [
+      { db: 'app', tables: [{ name: 'events', columns: [{ name: 'status', type: ENUM_STATUS }] }] },
+      { db: 'other', tables: [{ name: 'events', columns: [{ name: 'status', type: 'String' }] }] },
+    ];
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, schema)).toBeNull();
+  });
+
+  it('an empty scope (no FROM at all) → null', () => {
+    expect(resolveComparisonColumnType('SELECT {s:String}', 5, { qualifier: null, column: 'status' }, schemaWith([{ name: 'status', type: ENUM_STATUS }]))).toBeNull();
+  });
+
+  it('a null/undefined schema resolves to null without throwing', () => {
+    const sql = 'SELECT * FROM events WHERE status = {s:String}';
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, null)).toBeNull();
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, undefined)).toBeNull();
+  });
+
+  it('a db-qualified FROM (candidate.db set) only matches the schema entry with that db', () => {
+    const sql = 'SELECT * FROM app.events e WHERE e.status = {s:String}';
+    const schema = [
+      { db: 'app', tables: [{ name: 'events', columns: [{ name: 'status', type: ENUM_STATUS }] }] },
+      { db: 'other', tables: [{ name: 'events', columns: [{ name: 'status', type: 'String' }] }] },
+    ];
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: 'e', column: 'status' }, schema)).toBe(ENUM_STATUS);
+  });
+
+  it('a schema entry with no tables list at all is tolerated (skipped, not thrown on)', () => {
+    const sql = 'SELECT * FROM events WHERE status = {s:String}';
+    const schema = [
+      { db: 'nolist' },
+      { db: 'app', tables: [{ name: 'events', columns: [{ name: 'status', type: ENUM_STATUS }] }] },
+    ];
+    expect(resolveComparisonColumnType(sql, sql.length, { qualifier: null, column: 'status' }, schema)).toBe(ENUM_STATUS);
+  });
+
+  // Review F3: multi-ref refs (same column name, different qualifier text —
+  // param-comparison.js now defers those instead of calling CONFLICT on raw
+  // qualifier inequality) match only when every ref resolves to the SAME table.
+  describe('multi-ref (refs) resolved-identity comparison (review F3)', () => {
+    const refsFor = (sql, quals) => ({
+      qualifier: quals[0], column: 'status', pos: sql.indexOf('{s:'),
+      refs: quals.map((q, i) => ({
+        qualifier: q, column: 'status',
+        pos: i === 0 ? sql.indexOf('{s:') : sql.lastIndexOf('{s:'),
+      })),
+    });
+
+    it('alias-qualified + unqualified refs to the same single-table column match', () => {
+      const sql = 'SELECT * FROM events e WHERE e.status = {s:String} OR status = {s:String}';
+      const schema = schemaWith([{ name: 'status', type: ENUM_STATUS }]);
+      expect(resolveComparisonColumnType(sql, sql.indexOf('{s:'), refsFor(sql, ['e', null]), schema)).toBe(ENUM_STATUS);
+    });
+
+    it('refs resolving to the two sides of a JOIN (genuinely different tables) → null', () => {
+      const sql = 'SELECT * FROM events x JOIN other y ON 1=1 WHERE x.status = {s:String} OR y.status = {s:String}';
+      const schema = [
+        { db: 'app', tables: [
+          { name: 'events', columns: [{ name: 'status', type: ENUM_STATUS }] },
+          { name: 'other', columns: [{ name: 'status', type: ENUM_STATUS }] },
+        ] },
+      ];
+      expect(resolveComparisonColumnType(sql, sql.indexOf('{s:'), refsFor(sql, ['x', 'y']), schema)).toBeNull();
+    });
+
+    it('one unresolvable ref (ambiguous unqualified in a JOIN) nulls the whole match — conservative', () => {
+      const sql = 'SELECT * FROM events e JOIN other o ON 1=1 WHERE e.status = {s:String} OR status = {s:String}';
+      const schema = [
+        { db: 'app', tables: [
+          { name: 'events', columns: [{ name: 'status', type: ENUM_STATUS }] },
+          { name: 'other', columns: [] },
+        ] },
+      ];
+      expect(resolveComparisonColumnType(sql, sql.indexOf('{s:'), refsFor(sql, ['e', null]), schema)).toBeNull();
+    });
   });
 });

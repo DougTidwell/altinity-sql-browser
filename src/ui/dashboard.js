@@ -13,9 +13,20 @@ import { h } from './dom.js';
 import { Icon } from './icons.js';
 import { renderChart } from './results.js';
 import { schemaKey } from '../core/chart-data.js';
-import { classifyTile, dashboardParams } from '../core/dashboard.js';
+import { classifyTile } from '../core/dashboard.js';
 import { formatBytes, formatRows } from '../core/format.js';
-import { readStatementParams, unfilledParams } from '../core/query-params.js';
+import {
+  analyzeParameterizedSources, prepareParameterizedBatch, mergedSourceArgs, mergedSourceSql, fieldControls,
+  fieldControlKind,
+} from '../core/param-pipeline.js';
+import { hasOptionalBlocks } from '../core/optional-blocks.js';
+import { effectiveFilterActive } from '../state.js';
+import { applyFieldState } from './var-field.js';
+import { buildRelativeTimeField } from './relative-time-field.js';
+import { buildRecentField } from './recent-field.js';
+import { buildEnumField } from './enum-field.js';
+import { wireComboInput } from './combobox.js';
+import { recentOptions } from '../core/recent-values.js';
 
 // At most this many tile queries run at once, so a large favorites list doesn't
 // fire a thundering herd of concurrent reads at ClickHouse (saturating the
@@ -109,16 +120,16 @@ function setSlotLoading(slot) {
   slot.foot.replaceChildren();
 }
 
-// A tile whose SQL still has an empty/absent {name:Type} value never calls
-// app.runTile — it shows this placeholder instead (reusing the card's header/
-// footer chrome so it doesn't look broken), and stays visible: unlike a
-// classifyTile `skip`, one filter value away it becomes chartable, so it is
-// NOT counted in the header's "N not shown" note.
-function setSlotUnfilled(slot, missing) {
+// A tile whose SQL still has an empty/absent, or invalid (#170), {name:Type}
+// value never calls app.runTile — it shows this placeholder instead (reusing
+// the card's header/footer chrome so it doesn't look broken), and stays
+// visible: unlike a classifyTile `skip`, one filter value away it becomes
+// chartable, so it is NOT counted in the header's "N not shown" note.
+function setSlotUnfilled(slot, names) {
   destroySlotChart(slot);
   slot.status = 'unfilled';
   slot.card.style.display = '';
-  slot.body.replaceChildren(h('div', { class: 'dash-tile-unfilled' }, 'Enter a value for: ' + missing.join(', ')));
+  slot.body.replaceChildren(h('div', { class: 'dash-tile-unfilled' }, 'Enter a value for: ' + names.join(', ')));
   slot.foot.replaceChildren();
 }
 
@@ -160,57 +171,136 @@ function applyTileResult(app, q, slot, r) {
   slot.foot.replaceChildren(...tileFooter(r.meta));
 }
 
-// Run (or re-run) one favorite's tile into its slot: gate on unfilled
-// `{name:Type}` values first (never calling app.runTile while any are empty),
-// otherwise fetch and classify. `onSettled()` fires after every transition
-// (unfilled or fetched) so the caller can recompute the live "N not shown"
-// count. The generation bump happens before the gate check so a superseded
-// in-flight fetch is discarded even if the newer edit resolves to "unfilled".
-async function runSlotTile(app, q, slot, onSettled) {
+// Run (or re-run) one favorite's tile into its slot, gated by its prepared
+// source from the wave's batch (#173): unfilled OR invalid (#170) `{name:Type}`
+// values show the placeholder (never calling app.runTile — an invalid value
+// left to reach the server would either error confusingly or, for Int/UInt,
+// silently wrap; see param-validate.js), a per-source error (e.g. a value
+// that can't serialize for this tile's declaration) shows an error card —
+// blocking only this tile, never its siblings — otherwise fetch with the
+// batch's prepared args and classify. `onSettled()` fires after every
+// transition (unfilled, errored or fetched) so the caller can recompute the
+// live "N not shown" count. The generation bump happens before the gate check
+// so a superseded in-flight fetch is discarded even if the newer edit resolves
+// to "unfilled".
+async function runSlotTile(app, q, slot, onSettled, src) {
   const myGen = ++slot.gen;
-  const missing = unfilledParams(q.sql, app.state.varValues);
-  if (missing.length) {
-    setSlotUnfilled(slot, missing);
+  if (src.missing.length || src.invalid.length) {
+    setSlotUnfilled(slot, src.missing.concat(src.invalid));
+    onSettled();
+    return;
+  }
+  if (src.errors.length) {
+    applyTileResult(app, q, slot, { error: src.errors[0] });
     onSettled();
     return;
   }
   setSlotLoading(slot);
-  const r = await app.runTile(q.sql);
+  // The wire text is the wave's materialized execution view (#165) — only when
+  // the favorite actually is a template; block-free SQL keeps its exact bytes.
+  const execSql = hasOptionalBlocks(q.sql) ? mergedSourceSql(src, q.sql) : q.sql;
+  const r = await app.runTile(execSql, mergedSourceArgs(src));
   if (slot.gen !== myGen) return; // a newer edit started after this fetch; discard
   applyTileResult(app, q, slot, r);
+  // #171: this tile completed successfully — record its bound params (the
+  // exact wave's boundParams snapshot, so a param confined to an inactive
+  // optional block — never in `src.statements[*].boundParams` — is never
+  // recorded). A superseded/discarded fetch (the `return` above) never
+  // reaches here at all.
+  if (r.error == null) app.recordBoundParams(src.statements.flatMap((s) => s.boundParams));
   onSettled();
 }
 
 // The global filter bar (#149 D3): one field per `{name:Type}` parameter
-// referenced by any favorite, sharing `app.state.varValues` with the SQL
-// Browser workbench. Hidden entirely (no row, no spacing) when there are no
-// detected params — same convention as the workbench's `var-strip`. Typing
-// debounces before calling `onCommit(name)`; Enter or blur fires immediately,
-// clearing any pending debounce so a value never applies twice.
-function buildFilterBar(app, params, onCommit) {
+// referenced by any favorite — detected on the all-active analysis view
+// (#165), so a param confined to /*[ ]*/ optional blocks is listed too, marked
+// optional (blank keeps its predicates out instead of blocking the tile) —
+// sharing `app.state.varValues`/`app.state.filterActive` with the SQL Browser
+// workbench. Hidden entirely (no row, no spacing) when there are no detected
+// params — same convention as the workbench's `var-strip`. Typing debounces
+// before calling `onCommit(name)`; Enter or blur fires immediately, clearing
+// any pending debounce so a value never applies twice. `getField(name, mode)`
+// reads the field's current #170-validated state ('input' while typing —
+// neutral on a plausible prefix; 'execute' on blur/Enter — hardens it) for
+// the shared invalid-field affordance (var-field.js); `commitNow`'s no-op
+// short-circuit (nothing pending) is independent of that repaint, so blurring
+// an untouched-since-last-commit field still (re)shows the right state.
+function buildFilterBar(app, params, onCommit, getField) {
   if (!params.length) return h('div', { class: 'dash-filters', style: { display: 'none' } });
   return h('div', { class: 'dash-filters' }, ...params.map((p) => {
     let timer = null;
+    // #173 acceptance (review F1): a type-conflicted param (declared with
+    // disagreeing types across favorites) degrades to the plain text control
+    // (fieldControlKind below) and says so visibly — a warning style distinct
+    // from is-invalid (the VALUE isn't wrong; the declarations disagree) plus
+    // a tooltip listing them.
+    const conflictNote = p.conflict
+      ? 'Conflicting type declarations: ' + p.conflict.join(' vs ') : null;
+    const baseTitle = p.name + ': ' + p.type
+      + (p.optional ? ' — optional: blank leaves its filter block out' : '')
+      + (conflictNote ? ' — ' + conflictNote : '');
     const commitNow = () => {
       if (timer == null) return;
       clearTimeout(timer);
       timer = null;
       onCommit(p.name);
     };
-    const input = h('input', {
-      type: 'text', class: 'var-input',
-      value: app.state.varValues[p.name] || '',
-      placeholder: p.type, title: p.name + ': ' + p.type, 'aria-label': p.name,
-      oninput: (e) => {
-        app.state.varValues[p.name] = e.target.value;
-        app.saveVarValues();
-        clearTimeout(timer);
-        timer = setTimeout(commitNow, FILTER_DEBOUNCE_MS);
-      },
-      onkeydown: (e) => { if (e.key === 'Enter') commitNow(); },
-      onblur: commitNow,
-    });
-    return h('label', { class: 'var-field' }, h('span', { class: 'var-name' }, p.name), input);
+    // The shared control-kind priority (fieldControlKind, review F8): #172
+    // enum members (v1 only here — the declaration travels with the tile SQL;
+    // v2 schema-cache inference is workbench-only, and #160's curated
+    // `filter:` query is the Dashboard's no-declaration alternative) > #169
+    // date-like preset combobox + live preview > plain text with recents.
+    // The field stays free-text in every case; D3's debounce/Enter/blur
+    // commit semantics are unchanged either way.
+    const ctl = fieldControlKind(p);
+    let combo = null;
+    let input;
+    const onValueInput = () => {
+      app.state.varValues[p.name] = input.value;
+      // Text controls sync activation with the value (#165): an activation
+      // flip re-runs affected tiles exactly like a value change (same
+      // debounce + generation guard downstream).
+      app.state.filterActive[p.name] = input.value !== '';
+      app.saveVarValues();
+      app.saveFilterActive();
+      applyFieldState(input, getField(p.name, 'input'), baseTitle, combo && combo.previewEl);
+      clearTimeout(timer);
+      timer = setTimeout(commitNow, FILTER_DEBOUNCE_MS);
+    };
+    const onCommitHard = () => {
+      applyFieldState(input, getField(p.name, 'execute'), baseTitle, combo && combo.previewEl);
+      commitNow();
+    };
+    // #171: live-filtered recents for this field (type + typed text), read
+    // fresh on every open/keystroke (never a snapshot — see recent-field.js's
+    // header comment). (#160's curated-param opt-out hook: nothing to check
+    // yet — no curated param exists before #160 lands.)
+    const getRecents = (text) => recentOptions(app.state.varRecent, p.name, p.type, text);
+    const onClearRecent = () => app.clearVarRecent(p.name);
+    // A preset/recent pick is a deliberate, complete action (like Enter) —
+    // run immediately, bypassing the debounce `onValueInput` just armed,
+    // rather than waiting out FILTER_DEBOUNCE_MS for an explicit choice.
+    const onPick = () => {
+      applyFieldState(input, getField(p.name, 'execute'), baseTitle, combo && combo.previewEl);
+      clearTimeout(timer);
+      timer = null;
+      onCommit(p.name);
+    };
+    const fieldOpts = {
+      document: app.document, name: p.name, type: p.type, value: app.state.varValues[p.name] || '',
+      baseTitle, onValueInput, onCommit: onPick, getRecents, onClearRecent,
+    };
+    if (ctl.kind === 'enum') combo = buildEnumField({ ...fieldOpts, values: ctl.enumOptions });
+    else if (ctl.kind === 'date') combo = buildRelativeTimeField({ ...fieldOpts, wallNow: app.wallNow });
+    else combo = buildRecentField(fieldOpts);
+    input = combo.input;
+    // The shared listener block (review F8): the combobox hooks first, then
+    // D3's own persist-on-type / Enter-blur hard-commit bodies.
+    wireComboInput(combo, { onValueInput, onCommit: onCommitHard });
+    if (conflictNote) input.classList.add('is-conflict');
+    applyFieldState(input, getField(p.name, 'execute'), baseTitle, combo && combo.previewEl);
+    return h('label', { class: 'var-field' + (p.optional ? ' is-optional' : '') },
+      h('span', { class: 'var-name' }, p.name), combo.el);
   }));
 }
 
@@ -222,6 +312,24 @@ export function renderDashboard(app) {
   app.dom = {};
 
   const favorites = state.savedQueries.filter((q) => q.favorite);
+
+  // The favorites snapshot is fixed for this render, so the parameter analysis
+  // (#173 phase 1 — structure only) runs once; each wave (runAll / a filter's
+  // runAffected) prepares it against the current varValues with one wall-clock
+  // read, and every tile gate + fetch of that wave reads the same batch.
+  const tileId = (i) => 'tile:' + i;
+  const analysis = analyzeParameterizedSources(favorites.map((q, i) => ({
+    id: tileId(i), label: q.name, kind: 'tile', sql: q.sql, bindPolicy: 'row-returning',
+  })));
+  const prepareBatch = (validationMode = 'execute') => prepareParameterizedBatch(analysis, {
+    values: app.state.varValues,
+    active: effectiveFilterActive(app.state.varValues, app.state.filterActive),
+    wallNowMs: app.wallNow(), validationMode,
+  });
+  const prepareWave = () => prepareBatch('execute').sources;
+  // The filter bar's per-keystroke field-state read (#170): 'input' while
+  // typing (neutral on a plausible prefix), 'execute' on blur/Enter (hardens).
+  const getFilterField = (name, mode) => prepareBatch(mode).fields[name];
 
   const favChip = h('span', { class: 'dash-chip dash-fav' },
     Icon.star(true),
@@ -286,7 +394,7 @@ export function renderDashboard(app) {
     });
   const colsWrap = h('div', { class: 'dash-cols-wrap' },
     h('span', { class: 'dash-seg-label' }, 'Columns'), colsSeg.el);
-  const filterBar = buildFilterBar(app, dashboardParams(favorites), (name) => runAffected(name));
+  const filterBar = buildFilterBar(app, fieldControls(analysis), (name) => runAffected(name), getFilterField);
   const toolbar = h('div', { class: 'dash-toolbar' },
     layoutSeg.el,
     filterBar,
@@ -318,14 +426,18 @@ export function renderDashboard(app) {
   };
 
   // Re-run only the favorites whose SQL references `name` (a filter field's
-  // debounced/committed edit, #149 D3) — not the whole grid. A no-op before
+  // debounced/committed edit, #149 D3) — not the whole grid. Affected-source
+  // detection comes from the analysis (#173): `optionalIn` keeps a tile
+  // affected even while the param's optional blocks are inactive (#165), so an
+  // activation flip re-runs it exactly like a value change. A no-op before
   // the first successful run (slots not built yet).
   function runAffected(name) {
     if (!slots.length) return;
-    const targets = favorites
-      .map((q, i) => [q, i])
-      .filter(([q]) => readStatementParams(q.sql).some((p) => p.name === name));
-    return Promise.all(targets.map(([q, i]) => runSlotTile(app, q, slots[i], updateSkipNote)));
+    const f = analysis.fields[name]; // the filter bar only renders analyzed params
+    const affected = new Set(f.requiredIn.concat(f.optionalIn));
+    const wave = prepareWave();
+    const targets = favorites.map((q, i) => i).filter((i) => affected.has(tileId(i)));
+    return Promise.all(targets.map((i) => runSlotTile(app, favorites[i], slots[i], updateSkipNote, wave[i])));
   }
 
   const runAll = async () => {
@@ -343,11 +455,13 @@ export function renderDashboard(app) {
     // tiles beyond TILE_CONCURRENCY's window showing stale content (or, on
     // first load, an empty card) until the pool gets around to them.
     slots.forEach((s) => setSlotLoading(s));
+    // One prepared batch (and one wall-clock read) for the whole refresh wave.
+    const wave = prepareWave();
     // try/finally so the button always re-enables and the timestamp always
     // updates — even if a tile render unexpectedly throws (runSlotTile itself
     // is total, so this is belt-and-suspenders against the pool rejecting).
     try {
-      await runPool(favorites, TILE_CONCURRENCY, (q, i) => runSlotTile(app, q, slots[i], updateSkipNote));
+      await runPool(favorites, TILE_CONCURRENCY, (q, i) => runSlotTile(app, q, slots[i], updateSkipNote, wave[i]));
     } finally {
       updated.textContent = 'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       refreshBtn.disabled = false;

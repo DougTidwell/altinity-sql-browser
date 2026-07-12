@@ -7,6 +7,7 @@ import { mergeSaved } from './core/saved-io.js';
 import { cloneChartCfg } from './core/chart-data.js';
 import { normalizeDashLayout, normalizeDashCols } from './core/dashboard.js';
 import { loadJSON, saveJSON, loadStr, saveStr } from './core/storage.js';
+import { emptyRecentMap } from './core/recent-values.js';
 import { signal } from '@preact/signals-core';
 
 /** A tab's chart state as a persistable payload `{ cfg, key }`, or null. */
@@ -29,8 +30,11 @@ export const KEYS = {
   libraryName: 'asb:libraryName',
   resultRowLimit: 'asb:resultRowLimit',
   varValues: 'asb:varValues',
+  filterActive: 'asb:filterActive',
   dashLayout: 'asb:dashLayout',
   dashCols: 'asb:dashCols',
+  varRecent: 'asb:varRecent',
+  varRecentDisabled: 'asb:varRecentDisabled',
 };
 
 /** Row-limit options for the result cap selector (shared between state + UI). */
@@ -146,6 +150,25 @@ export function createState(read = { loadJSON, loadStr }) {
     // wherever the same variable appears. Persisted (asb:varValues) so it also
     // survives reloads. A plain object, mutated in place + re-saved by app.js.
     varValues: read.loadJSON(KEYS.varValues, {}),
+    // Explicit filter activation for optional SQL blocks (#165), keyed by
+    // param name and shared/persisted exactly like varValues (its own key;
+    // never carried in share links — varValues aren't either). true ⇒ the
+    // param's optional blocks are included; false ⇒ omitted, whatever dormant
+    // value varValues still holds. Text controls keep it in sync with the
+    // value (blank ⇒ false, typed ⇒ true); a name with no entry derives its
+    // activation from the stored value (effectiveFilterActive below), so
+    // pre-#165 persisted values keep working on first load.
+    filterActive: read.loadJSON(KEYS.filterActive, {}),
+    // Per-variable MRU recent-value history (#171): recorded from a
+    // successful statement's `boundParams` (#173's immutable snapshots) —
+    // never from a keystroke — keyed by variable name and shared/persisted
+    // exactly like varValues (its own key; never carried in share links).
+    // See core/recent-values.js for the shape and its pure ops.
+    varRecent: read.loadJSON(KEYS.varRecent, emptyRecentMap()),
+    // Disable-history preference (#171, "settings"): when true, new values
+    // stop being recorded but existing history is retained until explicitly
+    // cleared (Clear all recent values / per-field Clear recent).
+    varRecentDisabled: read.loadJSON(KEYS.varRecentDisabled, false),
     sidePanel: signal(read.loadStr(KEYS.sidePanel, 'saved')),
     savedQueries: read.loadJSON(KEYS.saved, []),
     // Which saved row (if any) is showing its inline edit form (saved-history.js).
@@ -184,6 +207,23 @@ export function createState(read = { loadJSON, loadStr }) {
 /** The currently-active tab object (falls back to the first tab). */
 export function activeTab(state) {
   return state.tabs.value.find((t) => t.id === state.activeTabId.value) || state.tabs.value[0];
+}
+
+/**
+ * The effective optional-block activation map (#165) the parameter pipeline
+ * consumes: an explicit `filterActive` entry wins; a param with no entry
+ * derives activation from its stored value (non-empty ⇒ active), so persisted
+ * pre-#165 varValues keep working on first load — and a first load with
+ * neither entry defaults to inactive without throwing. Pure.
+ * @param {Object<string, any>} [values] state.varValues
+ * @param {Object<string, boolean>} [filterActive] state.filterActive
+ * @returns {Object<string, boolean>}
+ */
+export function effectiveFilterActive(values = {}, filterActive = {}) {
+  const out = {};
+  for (const [name, v] of Object.entries(values)) out[name] = v != null && v !== '';
+  for (const [name, a] of Object.entries(filterActive)) out[name] = !!a;
+  return out;
 }
 
 /** Allocate a new tab id ('t2', 't3', ...). */
